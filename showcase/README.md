@@ -2,7 +2,9 @@
 
 安装器 v1.2.0 的展示视频，只展示菜单界面本身，没有字幕和标题文字。
 
-- 成片：`out/gta5-installer-showcase.mp4`（1920×1080，60fps，约 44 秒，无音轨）
+- 成片：`out/gta5-installer-showcase.mp4`（1920×1080，60fps，43.8 秒，含配乐，内嵌封面）
+- 封面：`out/cover.png`（1920×1080）
+- 配乐：`out/music.m4a`（原创合成，120 BPM，A 小调，-14 LUFS）
 - 界面按真实截图（1160×950）在 HTML 里逐像素还原，镜头推近时依旧清晰
 
 ## 镜头顺序
@@ -30,4 +32,24 @@ node stills.js /tmp/stills 3.5 20 30   # 导出指定时间点的静帧预览
 - `app.js`：界面还原（页面数据、图标、颜色工具）
 - `index.html`：镜头关键帧、光标路径、交互时间轴，`renderFrame(t)` 可任意定位
 - `render.js`：逐帧截图 → ffmpeg 分段编码 → 无损拼接；`--scale 2` 为 2 倍超采样
-- 镜头切换卡在 0.5 秒网格附近，配 120 BPM 的 BGM 比较好对点
+- `music.py`：配乐合成（numpy + scipy），节拍网格从 0.4s 起，三个硬切和九宫格落定都在拍上；甩镜配 whoosh，点击配咔嗒声
+- `cover.html` / `cover.js`：封面
+
+## 配乐与合成
+
+| 时间 | 段落 |
+| --- | --- |
+| 0–2.4s | 前奏：铺底 + 琶音 + 上升音效，窗口落定时低频冲击 |
+| 2.4–16.4s | 律动 A：四拍底鼓、拍手、反拍镲、低音、和弦 |
+| 16.4–32.4s | 律动 B：加入琶音主旋律，16.9 / 17.9 / 18.9 三个硬切配重音 |
+| 32.4–36.4s | 收束：鼓组退出，只留铺底和琶音（拖入 kit） |
+| 36.4–40.4s | 推进：军鼓滚奏加速 + 上升音效 |
+| 40.4s– | 九宫格落定：重拍 + 长和弦，淡出 |
+
+```bash
+python3 music.py /tmp/music.wav
+node cover.js out/cover.png
+ffmpeg -i silent.mp4 -i /tmp/music.wav -i cover.jpg -map 0:v -map 1:a -map 2:v \
+  -c:v:0 copy -c:v:1 mjpeg -disposition:v:1 attached_pic -c:a aac -b:a 320k -af volume=-0.6dB \
+  -movflags +faststart out/gta5-installer-showcase.mp4
+```

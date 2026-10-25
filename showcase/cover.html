@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>GTA5 中文字体包 · 封面</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  #cover { position: absolute; inset: 0; overflow: hidden; background: #08080a; }
+  #cover .glow { position: absolute; inset: 0;
+    background: radial-gradient(ellipse 42% 55% at 72% 52%, rgba(10,110,219,.38), transparent 70%),
+                radial-gradient(ellipse 30% 40% at 18% 60%, rgba(90,87,223,.18), transparent 70%); }
+  #cover .lens { position: absolute; inset: 0; perspective: 2200px; perspective-origin: 1300px 540px; }
+  #cover .lens .win { transform-origin: 0 0; }
+  #cover .vig { position: absolute; inset: 0; background: linear-gradient(90deg, rgba(8,8,10,.96) 0%, rgba(8,8,10,.85) 30%, rgba(8,8,10,0) 52%); }
+  #cover .txt { position: absolute; left: 120px; top: 0; bottom: 0; display: flex; flex-direction: column; justify-content: center; color: #fff; }
+  #cover .bigicon { width: 132px; height: 132px; border-radius: 30px; font-size: 74px; box-shadow: 0 24px 70px rgba(10,110,219,.55), inset 0 1px 0 rgba(255,255,255,.35); }
+  #cover h1 { font-size: 104px; font-weight: 900; line-height: 1.05; margin-top: 44px; letter-spacing: -.01em; }
+  #cover h1 small { display: block; font-size: 104px; }
+  #cover .ver { margin-top: 30px; display: flex; align-items: center; gap: 16px; font-size: 30px; font-weight: 500; color: #b4b4ba; }
+  #cover .ver b { font: 600 24px 'JetBrains Mono', monospace; color: #fff; background: #0a6edb; border-radius: 10px; padding: 6px 14px; }
+  #cover .tiles { display: flex; gap: 14px; margin-top: 54px; }
+  #cover .tiles .itile { box-shadow: 0 8px 22px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.25); }
+</style>
+</head>
+<body>
+<div id="cover">
+  <div class="glow"></div>
+  <div class="lens" id="lens"></div>
+  <div class="vig"></div>
+  <div class="txt">
+    <div class="bigicon">字</div>
+    <h1>GTA5<small>中文字体包</small></h1>
+    <div class="ver"><b>v1.2.0</b>选装安装器 · GTA V 增强版</div>
+    <div class="tiles" id="tiles"></div>
+  </div>
+</div>
+<script src="app.js"></script>
+<script>
+const a = makeApp(['ui']);
+a.q('.page').style.opacity = 1;
+a.q('.navsel').style.top = (NAV_Y[pageIndex('ui')] - 16 - 32) + 'px';
+a.q('[data-f1]').textContent = '已选 20 项'; a.q('[data-f2]').textContent = '移除 2 项';
+const btn = a.q('[data-btn]'); btn.textContent = '安装'; btn.style.width = '67px'; btn.style.left = '696px'; a.q('[data-link]').style.left = '624px';
+// 取色器设成视频结尾的紫色
+const [h, s, v] = [258, .707, .643], rgb = hsv2rgb(h, s, v), hex = toHex(rgb), c = '#' + hex, hueC = 'rgb(' + hsv2rgb(h, 1, 1) + ')';
+a.q('.sv').style.background = hueC;
+Object.assign(a.q('.svk').style, { left: s * 307 + 'px', top: (1 - v) * 122 + 'px', background: c });
+Object.assign(a.q('.huek').style, { left: h / 360 * 307 + 'px', background: hueC });
+a.q('[data-v="r"]').textContent = rgb[0]; a.q('[data-v="g"]').textContent = rgb[1]; a.q('[data-v="b"]').textContent = rgb[2]; a.q('[data-v="hex"]').textContent = hex;
+const lt = 'rgb(' + rgb.map(u => Math.round(u + (255 - u) * .28)) + ')', dk = 'rgb(' + rgb.map(u => Math.round(u * .78)) + ')';
+a.q('.pvban').style.background = `linear-gradient(180deg, ${lt}, ${c} 55%, ${dk})`;
+const cr = a.q('[data-colorrow="c3"]'); cr.querySelector('.hx').textContent = c; cr.querySelector('.dot').style.background = c;
+// 3D 摆放：窗口偏右、向左转
+a.el.style.transform = 'translate3d(960px,40px,0) rotateY(-26deg) rotateX(8deg) rotateZ(-3deg) scale(1.0)';
+document.getElementById('lens').appendChild(a.el);
+document.getElementById('tiles').innerHTML = PAGES.slice(1).map(p => iconTile(p, 58, 15, 32)).join('');
+window.ready = document.fonts.ready.then(() => new Promise(r => setTimeout(r, 300)));
+</script>
+</body>
+</html>
