@@ -1,0 +1,122 @@
+@import url(fonts/fonts.css);
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 1920px; height: 1080px; overflow: hidden; background: #08080a; }
+body { font-family: 'Noto Sans SC', sans-serif; -webkit-font-smoothing: antialiased; }
+.mono { font-family: 'JetBrains Mono', monospace; }
+
+/* ---------- 舞台 ---------- */
+#stage { position: absolute; inset: 0; overflow: hidden; background: #08080a; }
+#glow { position: absolute; inset: -20%; opacity: .55; }
+#vignette { position: absolute; inset: 0; background: radial-gradient(ellipse at 50% 45%, transparent 40%, rgba(0,0,0,.65) 100%); pointer-events: none; }
+#lens { position: absolute; inset: 0; perspective: 2000px; perspective-origin: 960px 540px; }
+#cam { position: absolute; left: 0; top: 0; transform-origin: 0 0; transform-style: preserve-3d; }
+
+
+/* ---------- 窗口 ---------- */
+.win { position: absolute; left: 0; top: 0; width: 1160px; height: 950px; background: #1c1c1e; border-radius: 8px; overflow: hidden; color: #fff;
+  box-shadow: 0 0 0 1px rgba(255,255,255,.10), 0 50px 140px rgba(0,0,0,.7), 0 10px 40px rgba(0,0,0,.5); }
+.tb { position: absolute; left: 0; top: 0; width: 1160px; height: 32px; background: #73889f; }
+.tbi { position: absolute; left: 7px; top: 8px; width: 15px; height: 15px; border-radius: 3.5px; background: linear-gradient(180deg,#3f95ff,#1062e0); font-size: 10px; font-weight: 900; line-height: 15px; text-align: center; color: #fff; }
+.tbt { position: absolute; left: 28px; top: 0; line-height: 31px; font-size: 13.5px; color: #26303c; }
+.ctl { position: absolute; top: 10px; width: 12px; height: 12px; }
+.side { position: absolute; left: 0; top: 32px; width: 236px; height: 918px; background: #252527; border-right: 1px solid #3c3c3f; }
+.search { position: absolute; left: 13px; top: 13px; width: 211px; height: 30px; border-radius: 8px; background: #38383d; display: flex; align-items: center; gap: 9px; padding-left: 11px; font-size: 13.5px; color: #98989d; }
+.navsel { position: absolute; left: 11px; width: 215px; height: 32px; border-radius: 7px; background: #0a6edb; top: 55px; }
+.nav { position: absolute; left: 11px; width: 215px; height: 32px; display: flex; align-items: center; gap: 9px; padding-left: 8px; font-size: 13.5px; font-weight: 700; }
+.itile { display: flex; align-items: center; justify-content: center; flex: none; box-shadow: inset 0 1px 0 rgba(255,255,255,.22); }
+.sdiv { position: absolute; left: 19px; top: 328px; width: 199px; height: 1px; background: #3f3f42; }
+.sfoot { position: absolute; left: 0; top: 875px; width: 235px; height: 43px; border-top: 1px solid #3a3a3e; font-size: 12px; color: #a1a1a6; padding: 12px 0 0 19px; }
+.mainclip { position: absolute; left: 237px; top: 32px; width: 923px; height: 855px; overflow: hidden; }
+.pages { position: absolute; left: -237px; top: -32px; width: 1160px; height: 950px; }
+.page { position: absolute; inset: 0; }
+.sbar { position: absolute; left: 1148px; width: 6px; border-radius: 3px; background: #3d3d41; }
+.foot { position: absolute; left: 237px; top: 887px; width: 923px; height: 63px; background: #1c1c1f; border-top: 1px solid #38383c; }
+.fl { position: absolute; left: 159px; top: 13px; width: 300px; height: 40px; overflow: hidden; }
+.fa, .fb { position: absolute; left: 0; top: 0; }
+.fl b { display: block; font-size: 14px; font-weight: 700; line-height: 18px; }
+.fl span { display: block; font-size: 13px; color: #b0b0b5; line-height: 18px; margin-top: 1px; }
+.link { position: absolute; top: 21px; font-size: 13.5px; font-weight: 700; color: #49a2fd; }
+.pbtn { position: absolute; top: 16px; height: 31px; border-radius: 7px; background: #0a6edb; font-size: 13.5px; font-weight: 700; line-height: 31px; text-align: center; transform-origin: center; }
+.overlay { position: absolute; inset: 0; pointer-events: none; }
+
+/* 页面元素 */
+.phead { position: absolute; top: 65px; }
+.phead .itile { position: absolute; left: 0; top: 0; }
+.ptitle { position: absolute; left: 58px; top: -3px; font-size: 22px; font-weight: 700; white-space: nowrap; line-height: 30px; }
+.psub { position: absolute; left: 58px; top: 29px; font-size: 13px; color: #8e8e93; white-space: nowrap; }
+.ohead { position: absolute; left: 390px; top: 63px; }
+.bigicon { width: 64px; height: 64px; border-radius: 15px; background: linear-gradient(180deg,#4a9cff,#0f5fdd); display: flex; align-items: center; justify-content: center; font-size: 35px; font-weight: 900; color: #fff;
+  box-shadow: 0 8px 26px rgba(10,110,219,.35), inset 0 1px 0 rgba(255,255,255,.3); }
+.otitle { position: absolute; left: 80px; top: 5px; font-size: 23px; font-weight: 700; white-space: nowrap; }
+.osub { position: absolute; left: 80px; top: 38px; font-size: 13px; color: #9a9a9f; white-space: nowrap; }
+.slabel { position: absolute; font-size: 13px; font-weight: 700; color: #e5e5ea; }
+.slabel.r { text-align: right; color: #8e8e93; font-weight: 500; }
+.card { position: absolute; width: 605px; background: #2c2c2e; border-radius: 10px; overflow: hidden; }
+.row { position: relative; height: 59px; padding: 0 14px; display: flex; flex-direction: column; justify-content: center; border-top: 1px solid #3a3a3c; }
+.row:first-child { border-top: none; }
+.row.short { height: 47px; }
+.row.sub { height: 46px; padding-left: 28px; }
+.row.ck { padding-left: 46px; }
+.row.tall { height: 115px; }
+.row .hov { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; }
+.rt { font-size: 14px; font-weight: 700; line-height: 20px; display: flex; align-items: center; gap: 7px; white-space: nowrap; }
+.rt.red { color: #ff6961; gap: 0; }
+.rd { font-size: 12.5px; color: #a1a1a6; line-height: 18px; margin-top: 1px; white-space: nowrap; }
+.rd.mono { font-size: 11.5px; }
+.rd.wrap { white-space: normal; line-height: 19.5px; padding-right: 8px; }
+.badge { font-size: 10.5px; font-weight: 700; color: #3ccf63; background: rgba(48,209,88,.17); padding: 0 5px; border-radius: 4px; line-height: 17px; }
+.badge.gray { color: #c7c7cc; background: #48484c; font-weight: 600; }
+.gck { position: absolute; left: 14px; top: 50%; margin-top: -9.5px; width: 19px; height: 19px; border-radius: 50%; background: #30d158; display: flex; align-items: center; justify-content: center; }
+.btn2 { position: absolute; right: 15px; top: 15px; height: 29px; padding: 0 13px; border-radius: 7px; background: #3d3d42; font-size: 13px; font-weight: 500; line-height: 29px; color: #ededf0; }
+.btn2.c { position: static; display: inline-block; margin-top: 16px; }
+.tg { position: absolute; right: 15px; top: 50%; margin-top: -12px; width: 40px; height: 24px; border-radius: 12px; background: color-mix(in srgb, #0a84ff calc(var(--p) * 100%), #48484a); }
+.tg i { position: absolute; left: 2px; top: 2px; width: 20px; height: 20px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.35); transform: translateX(calc(var(--p) * 16px)); }
+.tg.locked { background: #1b5795; }
+.tg.locked i { background: #98989a; }
+.rck { position: absolute; right: 17px; top: 50%; margin-top: -8px; opacity: 0; }
+.note { position: absolute; font-size: 12.5px; color: #a1a1a6; white-space: nowrap; }
+.hexr { position: absolute; right: 16px; top: 0; height: 100%; display: flex; align-items: center; gap: 9px; }
+.hx { font: 600 11px 'JetBrains Mono', monospace; color: #8e8e93; }
+.dot { width: 20px; height: 20px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(255,255,255,.12); margin-right: 6px; }
+
+/* 取色器 */
+.picker { position: relative; height: 247px; }
+.pv { position: absolute; left: 29px; top: 2px; width: 234px; height: 194px; border-radius: 8px; background: linear-gradient(160deg,#2b333d,#15191e); overflow: hidden; }
+.pvmenu { position: absolute; left: 39px; top: 19px; width: 156px; }
+.pvban { height: 40px; }
+.pvsel { height: 20px; background: #f2f2f2; display: flex; justify-content: flex-end; align-items: center; padding-right: 5px; }
+.pvrow { height: 21px; background: #0c0f14; display: flex; justify-content: flex-end; align-items: center; padding-right: 5px; }
+.pvsel svg, .pvrow svg { width: 9px; height: 9px; }
+.pvreset { position: absolute; left: 37px; top: 208px; font-size: 12.5px; font-weight: 700; color: #49a2fd; display: flex; gap: 5px; align-items: center; }
+.sv { position: absolute; left: 282px; top: 2px; width: 307px; height: 122px; border-radius: 8px; overflow: hidden; }
+.svw { position: absolute; inset: 0; background: linear-gradient(90deg,#fff,rgba(255,255,255,0)); }
+.svb { position: absolute; inset: 0; background: linear-gradient(0deg,#000,rgba(0,0,0,0)); }
+.svk { position: absolute; width: 18px; height: 18px; margin: -9px 0 0 -9px; border-radius: 50%; border: 2.5px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.35), 0 2px 6px rgba(0,0,0,.4); }
+.hue { position: absolute; left: 282px; top: 137px; width: 307px; height: 13px; border-radius: 7px;
+  background: linear-gradient(90deg,#f00 0%,#ff0 16.66%,#0f0 33.33%,#0ff 50%,#00f 66.66%,#f0f 83.33%,#f00 100%); }
+.huek { position: absolute; top: 50%; width: 21px; height: 21px; margin: -10.5px 0 0 -10.5px; border-radius: 50%; border: 3px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.3), 0 2px 6px rgba(0,0,0,.45); }
+.sw { position: absolute; left: 284px; top: 164px; display: flex; gap: 8px; }
+.sw span { width: 20px; height: 20px; border-radius: 50%; display: block; transition: none; }
+.sw b { position: absolute; left: 8.5px; top: 25px; width: 3px; height: 3px; border-radius: 50%; background: #8e8e93; }
+.ins { position: absolute; left: 282px; top: 196px; display: flex; gap: 6px; }
+.in { height: 27px; border-radius: 6px; background: #3d3d42; display: flex; align-items: center; justify-content: space-between; padding: 0 10px; font-size: 13px; font-weight: 500; }
+.in em { font-style: normal; font-size: 10px; font-weight: 700; color: #8e8e93; }
+.in.r, .in.g, .in.b { width: 63px; }
+.in.h { width: 100px; justify-content: flex-start; gap: 8px; }
+.in.h span { font: 700 12.5px 'JetBrains Mono', monospace; }
+
+/* 导入 */
+.drop { position: absolute; left: 390px; top: 137px; width: 603px; height: 203px; border-radius: 10px; background: #2c2c2e; border: 1.5px dashed #56565b; text-align: center; padding-top: 30px; }
+.dropic { height: 40px; display: flex; justify-content: center; }
+.dropt { font-size: 15px; font-weight: 700; margin-top: 12px; }
+.drops { font-size: 12px; color: #8e8e93; margin-top: 7px; }
+
+/* 光标 / 拖拽文件 */
+.cursor { position: absolute; left: 0; top: 0; width: 22px; height: 30px; transform-origin: 0 0; filter: drop-shadow(0 2px 3px rgba(0,0,0,.5)); }
+.ripple { position: absolute; border-radius: 50%; border: 2px solid rgba(255,255,255,.9); }
+.file { position: absolute; width: 92px; height: 112px; margin: -56px 0 0 -46px; }
+.file .doc { position: absolute; inset: 0 0 18px 0; background: linear-gradient(180deg,#f7f7fa,#dcdce2); border-radius: 8px 22px 8px 8px; box-shadow: 0 18px 40px rgba(0,0,0,.55); }
+.file .doc::after { content: ''; position: absolute; right: 0; top: 0; width: 22px; height: 22px; background: linear-gradient(225deg, transparent 50%, #b8b8c2 50%); border-radius: 0 0 0 6px; }
+.file .lbl { position: absolute; left: 10px; right: 10px; bottom: 30px; height: 22px; border-radius: 5px; background: linear-gradient(180deg,#c6a782,#9c7e57); font: 700 11px/22px 'JetBrains Mono', monospace; color: #fff; text-align: center; }
+.file .glyph { position: absolute; left: 0; right: 0; top: 18px; display: flex; justify-content: center; }
+.file .nm { position: absolute; left: -40px; right: -40px; bottom: -4px; text-align: center; font-size: 12px; font-weight: 700; color: #fff; text-shadow: 0 1px 4px rgba(0,0,0,.8); white-space: nowrap; }

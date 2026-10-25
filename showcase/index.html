@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>GTA5 中文字体包 · Showcase</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="stage">
+  <div id="glow"></div>
+  <div id="lens"><div id="cam"></div></div>
+  <div id="vignette"></div>
+</div>
+<svg width="0" height="0" style="position:absolute"><filter id="mb" x="-5%" y="-5%" width="110%" height="110%"><feGaussianBlur id="mbg" stdDeviation="0 0"/></filter></svg>
+<script src="app.js"></script>
+<script>
+'use strict';
+const DURATION = 43.8;
+const T0 = 2.9; // 内部时间轴从 2.9s 开始（无片头）
+
+/* ---------------- 缓动 / 插值 ---------------- */
+const E = {
+  lin: x => x,
+  sine: x => -(Math.cos(Math.PI * x) - 1) / 2,
+  cIn: x => x * x * x,
+  cOut: x => 1 - Math.pow(1 - x, 3),
+  cInOut: x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2,
+  qOut: x => 1 - Math.pow(1 - x, 5),
+  eIn: x => x === 0 ? 0 : Math.pow(2, 10 * x - 10),
+  eOut: x => x === 1 ? 1 : 1 - Math.pow(2, -10 * x),
+  eInOut: x => x === 0 ? 0 : x === 1 ? 1 : x < .5 ? Math.pow(2, 20 * x - 10) / 2 : (2 - Math.pow(2, -20 * x + 10)) / 2,
+  back: x => { const c1 = 1.9, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); },
+};
+const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v));
+const lerp = (a, b, p) => a + (b - a) * p;
+const prog = (t, a, b, e = 'lin') => E[e](clamp((t - a) / (b - a)));
+// keys: [[t, value, ease]]，ease 作用于到达该关键帧的那一段
+function track(t, keys) {
+  if (t <= keys[0][0]) return keys[0][1];
+  for (let i = 1; i < keys.length; i++) {
+    const [t1, v1, e = 'cInOut'] = keys[i];
+    if (t < t1) {
+      const [t0, v0] = keys[i - 1];
+      return lerp(v0, v1, E[e]((t - t0) / (t1 - t0)));
+    }
+  }
+  return keys[keys.length - 1][1];
+}
+const step = (t, list) => { let v = list[0][1]; for (const [tt, vv] of list) if (t >= tt) v = vv; return v; };
+
+/* ---------------- 构建场景 ---------------- */
+const cam = document.getElementById('cam');
+const main = makeApp();
+cam.appendChild(main.el);
+const fx = document.createElement('div');           // 光标、拖拽文件等（不受窗口裁切）
+fx.style.cssText = 'position:absolute;left:0;top:0;width:1160px;height:950px;transform-style:preserve-3d';
+fx.innerHTML = `
+  <div class="file" id="file"><div class="doc"><div class="glyph">${svg('dl', 30, 2.2, '#9c7e57')}</div><div class="lbl">.gtakit</div></div><div class="nm">NVE 路面.gtakit</div></div>
+  <div class="ripple" id="rip"></div>
+  <svg class="cursor" id="cur" viewBox="0 0 22 30"><path d="M2 2v22.5l5.6-5.3 3.6 8.3 3.7-1.6-3.6-8.1h7.9z" fill="#fff" stroke="#000" stroke-width="1.4" stroke-linejoin="round"/></svg>`;
+cam.appendChild(fx);
+
+// 行悬停层
+main.qa('[data-hov],[data-restore]').forEach(r => { const h = document.createElement('div'); h.className = 'hov'; r.prepend(h); });
+
+// 九宫格里的其它页面（静态，状态与截图一致）
+const GRID = [['overview', -1, -1], ['visual', 0, -1], ['water', 1, -1], ['tex', -1, 0], ['light', 1, 0], ['play', -1, 1], ['ui', 0, 1], ['traffic', 1, 1]];
+const clones = GRID.map(([id, c, r]) => {
+  const a = makeApp([id]);
+  const i = pageIndex(id);
+  a.q('.navsel').style.top = (NAV_Y[i] - 16 - 32) + 'px';
+  a.q('.page').style.opacity = 1;
+  if (id === 'visual') { a.q('[data-tg="v2"]').style.setProperty('--p', 0); a.q('[data-tg="v3"]').style.setProperty('--p', 0); a.q('[data-vsel]').textContent = '3'; }
+  if (id === 'water') a.q('[data-rck="w2"]').style.opacity = 1;
+  if (id !== 'overview') setFooter(a, '已选 20 项', '移除 2 项', 0);
+  else setFooter(a, '已选 22 项', '与当前安装相同', 1);
+  if (id === 'ui') applyColor(a, hex2hsv('8297AE'));
+  a.el.style.opacity = 0;
+  cam.insertBefore(a.el, main.el);
+  return { a, c, r, d: Math.hypot(c, r) };
+});
+
+function setFooter(app, l1, l2, reinstall) {
+  app.q('[data-f1]').textContent = l1; app.q('[data-f2]').textContent = l2;
+  const btn = app.q('[data-btn]'), link = app.q('[data-link]');
+  const w = lerp(67, 94, reinstall);
+  btn.textContent = reinstall > .5 ? '重新安装' : '安装';
+  btn.style.width = w + 'px'; btn.style.left = (763 - w) + 'px';
+  link.style.left = (624 - (w - 67)) + 'px';
+}
+function applyColor(app, [h, s, v]) {
+  const rgb = hsv2rgb(h, s, v), hex = toHex(rgb), c = '#' + hex;
+  const hueC = 'rgb(' + hsv2rgb(h, 1, 1).join(',') + ')';
+  app.q('.sv').style.background = hueC;
+  const svk = app.q('.svk'); svk.style.left = (s * 307) + 'px'; svk.style.top = ((1 - v) * 122) + 'px'; svk.style.background = c;
+  const hk = app.q('.huek'); hk.style.left = (h / 360 * 307) + 'px'; hk.style.background = hueC;
+  app.q('[data-v="r"]').textContent = rgb[0]; app.q('[data-v="g"]').textContent = rgb[1]; app.q('[data-v="b"]').textContent = rgb[2];
+  app.q('[data-v="hex"]').textContent = hex;
+  const light = 'rgb(' + rgb.map(u => Math.round(u + (255 - u) * .28)).join(',') + ')';
+  const dark = 'rgb(' + rgb.map(u => Math.round(u * .78)).join(',') + ')';
+  app.q('.pvban').style.background = `linear-gradient(180deg, ${light}, ${c} 55%, ${dark})`;
+  const cr = app.q('[data-colorrow="c3"]'); cr.querySelector('.hx').textContent = '#' + hex; cr.querySelector('.dot').style.background = c;
+}
+
+// 窗口坐标（忽略变换）
+function pos(el, ax = .5, ay = .5) {
+  let x = 0, y = 0, n = el;
+  while (n && n !== main.el) { x += n.offsetLeft; y += n.offsetTop; n = n.offsetParent; }
+  return [x + el.offsetWidth * ax, y + el.offsetHeight * ay];
+}
+const navPos = id => [78, NAV_Y[pageIndex(id)]];
+const tgPos = k => pos(main.q(`[data-tg="${k}"]`));
+const hovPos = k => { const [x, y] = pos(main.q(`[data-hov="${k}"]`)); return [x + 40, y + 4]; };
+const swPos = i => pos(main.q(`[data-sw="${i}"]`));
+const hueRect = () => { const [x, y] = pos(main.q('.hue'), 0, .5); return [x, y]; };
+const svRect = () => pos(main.q('.sv'), 0, 0);
+const huePos = h => { const [x, y] = hueRect(); return [x + h / 360 * 307, y]; };
+const svPos = (s, v) => { const [x, y] = svRect(); return [x + s * 307, y + (1 - v) * 122]; };
+
+/* ---------------- 时间轴 ---------------- */
+const NAV = [[0, 'overview', 0], [12.0, 'visual', 1], [16.6, 'water', 1], [19.8, 'tex', 0], [20.8, 'light', 0], [21.8, 'play', 0], [24.95, 'ui', 1], [31.6, 'traffic', 1], [35.1, 'kit', 1]];
+const CLICKS = [12.0, 13.3, 14.3, 16.6, 17.6, 18.3, 24.95, 28.3, 28.9, 31.6, 35.1, 41.7];
+const PRESS = [[26.0, 27.0], [27.2, 27.9], [29.3, 30.0], [35.9, 37.15]];
+
+// 颜色：初始 #8297AE
+const H0 = hex2hsv('8297AE'), PINK = hex2hsv('E93D82'), GREEN = hex2hsv('30A46C');
+const HUE = [[0, H0[0]], [26.0, H0[0]], [27.0, 18, 'sine'], [28.3, 18], [28.48, PINK[0], 'cOut'], [28.9, PINK[0]], [29.08, GREEN[0], 'cOut'], [29.3, GREEN[0]], [30.0, 258, 'sine']];
+const SAT = [[0, H0[1]], [27.2, H0[1]], [27.9, .80, 'sine'], [28.3, .80], [28.48, PINK[1], 'cOut'], [28.9, PINK[1]], [29.08, GREEN[1], 'cOut']];
+const VAL = [[0, H0[2]], [27.2, H0[2]], [27.9, .93, 'sine'], [28.3, .93], [28.48, PINK[2], 'cOut'], [28.9, PINK[2]], [29.08, GREEN[2], 'cOut']];
+const hsvAt = t => [track(t, HUE), track(t, SAT), track(t, VAL)];
+
+// 文件拖拽
+const FILE0 = [1330, 600];
+const dropC = () => { const [x, y] = pos(main.q('[data-drop]')); return [x, y + 6]; };
+
+// 光标：[t, [x,y] | fn, ease]
+function cursorKeys() {
+  const D = dropC();
+  return [
+    [8.4, [640, 905]], [9.1, [455, 813], 'cOut'], [10.9, [470, 822], 'sine'],
+    [11.2, [330, 470]], [11.9, navPos('visual'), 'cInOut'], [12.6, navPos('visual')], [13.15, tgPos('v2'), 'cInOut'], [13.7, tgPos('v2')], [14.15, tgPos('v3'), 'cInOut'],
+    [15.7, tgPos('v3')], [16.45, navPos('water'), 'cInOut'], [17.0, navPos('water')], [17.5, hovPos('w0'), 'cInOut'], [17.95, hovPos('w0')], [18.2, hovPos('w2'), 'cInOut'], [19.7, [hovPos('w2')[0] + 60, hovPos('w2')[1] + 14], 'sine'],
+    [24.4, [520, 560]], [24.85, navPos('ui'), 'cInOut'], [25.2, navPos('ui')], [25.9, huePos(H0[0]), 'cInOut'],
+    [26.0, 'hue'], [27.0, 'hue'], [27.15, svPos(H0[1], H0[2]), 'cInOut'], [27.2, 'sv'], [27.9, 'sv'],
+    [28.2, swPos(8), 'cInOut'], [28.55, swPos(8)], [28.8, swPos(4), 'cInOut'], [29.0, swPos(4)], [29.25, huePos(GREEN[0]), 'cInOut'], [29.3, 'hue'], [30.0, 'hue'],
+    [30.6, [760, 560], 'cInOut'], [31.45, navPos('traffic'), 'cInOut'], [31.8, navPos('traffic')], [32.5, [470, 300], 'cInOut'],
+    [32.9, hovPos('c0'), 'cOut'], [33.4, hovPos('c1'), 'cInOut'], [33.9, hovPos('c2'), 'cInOut'], [34.35, hovPos('c3'), 'cInOut'], [34.95, navPos('kit'), 'cInOut'], [35.3, navPos('kit')],
+    [35.85, [FILE0[0] + 6, FILE0[1] + 8]], [35.9, 'file'], [37.15, 'file'], [37.9, [D[0] + 60, D[1] + 40], 'sine'],
+    [40.75, [760, 790]], [41.55, pos(main.q('[data-btn]')), 'cInOut'], [42.6, pos(main.q('[data-btn]'))],
+  ];
+}
+const CUR_VIS = [[8.4, 10.95], [11.2, 19.75], [24.4, 35.35], [35.9, 37.95], [40.75, 42.4]];
+function fileAt(t) {
+  const D = dropC();
+  const p = prog(t, 35.9, 37.0, 'cInOut');
+  const x = lerp(FILE0[0], D[0], p), y = lerp(FILE0[1], D[1], p) - Math.sin(p * Math.PI) * 120;
+  return [x, y];
+}
+let CK = null;
+function cursorAt(t) {
+  CK = CK || cursorKeys();
+  const resolve = (v, tt) => v === 'hue' ? huePos(hsvAt(tt)[0]) : v === 'sv' ? svPos(hsvAt(tt)[1], hsvAt(tt)[2]) : v === 'file' ? (([x, y]) => [x + 6, y + 8])(fileAt(tt)) : v;
+  if (t <= CK[0][0]) return resolve(CK[0][1], t);
+  for (let i = 1; i < CK.length; i++) {
+    const [t1, v1, e = 'cInOut'] = CK[i];
+    if (t < t1) {
+      const [t0, v0] = CK[i - 1];
+      if (typeof v0 === 'string' && v0 === v1) return resolve(v0, t);
+      const a = resolve(v0, t0), b = resolve(v1, t1), p = E[e]((t - t0) / (t1 - t0));
+      return [lerp(a[0], b[0], p), lerp(a[1], b[1], p)];
+    }
+  }
+  return resolve(CK[CK.length - 1][1], t);
+}
+
+// 镜头：fx,fy 窗口焦点；s 缩放；rx/ry/rz 旋转；ox/oy 焦点在屏幕上的偏移
+const K = (t, fx, fy, s, rx, ry, rz, ox, oy, e = 'eInOut') => ({ t, fx, fy, s, rx, ry, rz, ox, oy, e });
+const CAM = [
+  K(2.95, 580, 475, .32, 62, 0, -28, 0, 160),
+  K(4.25, 580, 475, .93, 0, 0, 0, 0, 0, 'eOut'),
+  K(4.75, 580, 475, .95, 0, 0, 0, 0, 0, 'sine'),
+  K(5.5, 692, 300, 1.85, 4, -10, 0, 250, -60),
+  K(7.75, 692, 316, 1.98, 2, -5, 0, 250, -60, 'sine'),
+  K(8.15, 692, 800, 2.05, -4, 6, 0, 250, -120),
+  K(10.85, 680, 806, 2.2, -2, 9, 0, 250, -120, 'sine'),
+  K(11.3, 118, 230, 2.4, 0, 20, 0, -260, -40),
+  K(12.0, 118, 215, 2.5, 0, 18, 0, -260, -40, 'sine'),
+  K(12.75, 800, 300, 2.05, 6, -14, 0, 160, -110),
+  K(13.45, 820, 310, 2.12, 5, -12, 0, 160, -110, 'sine'),
+  K(13.95, 690, 918, 2.4, 0, 8, 0, 120, -230),
+  K(14.95, 680, 918, 2.5, 0, 6, 0, 120, -230, 'sine'),
+  K(15.6, 580, 475, .97, 0, -6, 0, 170, -30),
+  K(16.65, 580, 475, .99, 0, -4, 0, 170, -30, 'sine'),
+  K(17.2, 700, 226, 2.0, 26, -8, -6, 150, -130),
+  K(19.8, 700, 236, 2.2, 22, -6, -2, 150, -130, 'sine'),
+  K(19.8, 600, 270, 1.5, 0, 12, 3, 120, -90, 'lin'),
+  K(20.8, 620, 270, 1.72, 0, 8, 0, 120, -90, 'sine'),
+  K(20.8, 680, 190, 1.95, 0, -12, -2, 140, -110, 'lin'),
+  K(21.8, 680, 190, 2.15, 0, -9, 0, 140, -110, 'sine'),
+  K(21.8, 700, 150, 2.1, 34, -10, 0, 140, -80, 'lin'),
+  K(24.1, 700, 400, 2.1, 28, -6, 0, 140, -140, 'sine'),
+  K(24.65, 580, 475, .97, 0, 6, 0, 170, -30),
+  K(25.05, 580, 475, .99, 0, 5, 0, 170, -30, 'sine'),
+  K(25.7, 700, 742, 2.1, 6, -10, 0, 200, -190),
+  K(29.95, 720, 742, 2.22, 4, -6, 0, 200, -190, 'sine'),
+  K(30.7, 690, 500, 1.08, 0, 8, 0, 230, -30),
+  K(31.25, 690, 500, 1.1, 0, 6, 0, 230, -30, 'sine'),
+  K(31.55, 580, 475, .99, 0, 0, 0, 170, -30, 'cInOut'),
+  K(31.75, 580, 475, 1.0, 0, 0, 0, 170, -30, 'sine'),
+  K(32.05, 690, 265, 1.55, 12, 16, -20, 170, -130, 'eIn'),
+  K(32.55, 700, 255, 2.0, 8, 10, -4, 170, -130, 'eOut'),
+  K(34.4, 700, 262, 2.15, 6, 6, -1, 170, -130, 'sine'),
+  K(34.85, 580, 475, .99, 0, 0, 0, 170, -30),
+  K(35.2, 580, 475, 1.0, 0, 0, 0, 170, -30, 'sine'),
+  K(35.8, 692, 240, 1.75, 12, 0, 0, 0, -170),
+  K(37.5, 692, 245, 1.85, 10, -4, 0, 0, -170, 'sine'),
+  K(38.25, 692, 650, 1.7, 24, -10, 0, 170, -150),
+  K(40.6, 692, 730, 1.8, 20, -6, 0, 170, -150, 'sine'),
+  K(41.0, 860, 880, 2.3, 0, -12, 0, 0, -120),
+  K(41.85, 870, 885, 2.45, 0, -10, 0, 0, -120, 'sine'),
+  K(43.35, 580, 475, .4, 48, 0, -32, 0, 0),
+  K(45.5, 640, 440, .44, 44, 0, -26, 0, 0, 'sine'),
+  K(46.6, 640, 440, .24, 56, 0, -40, 0, 0, 'cIn'),
+];
+function camAt(t) {
+  const F = ['fx', 'fy', 's', 'rx', 'ry', 'rz', 'ox', 'oy'];
+  if (t <= CAM[0].t) return frame({ ...CAM[0] });
+  let i = 0; while (i < CAM.length - 1 && CAM[i + 1].t <= t) i++;
+  const a = CAM[i], b = CAM[i + 1];
+  if (!b) return frame({ ...a });
+  const p = E[b.e]((t - a.t) / (b.t - a.t)), o = {};
+  for (const f of F) o[f] = f === 's' ? Math.exp(lerp(Math.log(a.s), Math.log(b.s), p)) : lerp(a[f], b[f], p);
+  return frame(o);
+}
+const frame = o => (o.ox *= .3, o.oy *= .35, o);
+const camCSS = c => `translate3d(${960 + c.ox}px,${540 + c.oy}px,0) rotateX(${c.rx}deg) rotateY(${c.ry}deg) rotateZ(${c.rz}deg) scale(${c.s}) translate(${-c.fx}px,${-c.fy}px)`;
+function project(c, x, y) {
+  const m = new DOMMatrix().translate(960 + c.ox, 540 + c.oy).rotate(c.rx, 0, 0).rotate(0, c.ry, 0).rotate(0, 0, c.rz).scale(c.s, c.s, 1).translate(-c.fx, -c.fy);
+  const p = m.transformPoint(new DOMPoint(x, y, 0, 1));
+  const k = 2000 / (2000 - p.z);
+  return [960 + (p.x - 960) * k, 540 + (p.y - 540) * k];
+}
+
+
+/* ---------------- 主渲染 ---------------- */
+const pageEls = Object.fromEntries(main.qa('.page').map(p => [p.dataset.page, p]));
+const glow = document.getElementById('glow'), lens = document.getElementById('lens'), mbg = document.getElementById('mbg');
+const hex2rgb = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+
+function renderFrame(tt) {
+  const t = tt + T0;
+
+  // 镜头
+  const c = camAt(t);
+  cam.style.transform = camCSS(c);
+  lens.style.opacity = prog(t, 2.9, 3.35, 'cOut') * (1 - prog(t, 45.7, 46.6, 'cIn'));
+  // 方向性运动模糊：取多点屏幕位移
+  const cp = camAt(t - 1 / 60);
+  let dx = 0, dy = 0;
+  for (const [px, py] of [[c.fx, c.fy], [c.fx - 300, c.fy - 250], [c.fx + 300, c.fy + 250]]) {
+    const a = project(cp, px, py), b = project(c, px, py);
+    dx += Math.abs(b[0] - a[0]) / 3; dy += Math.abs(b[1] - a[1]) / 3;
+  }
+  const bx = Math.min(30, dx * .22), by = Math.min(30, dy * .22);
+  if (bx + by > 1.5) { mbg.setAttribute('stdDeviation', `${bx.toFixed(2)} ${by.toFixed(2)}`); lens.style.filter = 'url(#mb)'; }
+  else lens.style.filter = 'none';
+
+  // 页面
+  const navI = NAV.reduce((acc, n, i) => (t >= n[0] ? i : acc), 0);
+  const cur = NAV[navI], prevN = NAV[Math.max(0, navI - 1)];
+  for (const id in pageEls) {
+    const on = id === cur[1];
+    const p = cur[2] ? prog(t, cur[0], cur[0] + .16, 'cOut') : 1;
+    pageEls[id].style.opacity = on ? p : 0;
+    pageEls[id].style.transform = on ? `translateY(${(1 - p) * 8}px)` : 'none';
+  }
+  const ny = cur[2] ? lerp(NAV_Y[pageIndex(prevN[1])], NAV_Y[pageIndex(cur[1])], prog(t, cur[0], cur[0] + .22, 'cOut')) : NAV_Y[pageIndex(cur[1])];
+  main.q('.navsel').style.top = (ny - 16 - 32) + 'px';
+
+  // 背景氛围色
+  const ga = hex2rgb(PAGES[pageIndex(prevN[1])].grad[1]), gb = hex2rgb(PAGES[pageIndex(cur[1])].grad[1]);
+  const gp = prog(t, cur[0], cur[0] + .5, 'sine');
+  const gc0 = ga.map((u, i) => lerp(u, gb[i], gp)), ep = prog(t, 41.2, 42.4, 'sine');
+  const gc = gc0.map((u, i) => Math.round(lerp(u, [10, 110, 219][i], ep)));
+  const gAlpha = t < 43 ? .22 : lerp(.22, .3, prog(t, 43, 44));
+  glow.style.background = `radial-gradient(ellipse 50% 45% at 55% 50%, rgba(${gc.join(',')},${gAlpha}), transparent 70%)`;
+
+  // 概览：绿勾依次弹出
+  main.qa('[data-ck]').forEach(el => {
+    const i = +el.dataset.ck, p = E.back(clamp((t - (4.9 + (i < 4 ? i * .14 : .75))) / .4));
+    el.style.transform = `scale(${p})`;
+  });
+
+  // 画面：两次关闭
+  const v2 = 1 - prog(t, 13.3, 13.48, 'cOut'), v3 = 1 - prog(t, 14.3, 14.48, 'cOut');
+  main.q('[data-tg="v2"]').style.setProperty('--p', v2);
+  main.q('[data-tg="v3"]').style.setProperty('--p', v3);
+  main.q('[data-vsel]').textContent = t >= 14.3 ? 3 : t >= 13.3 ? 4 : 5;
+
+  // 底栏计数（滚动切换）
+  const FS = [[0, ['已选 22 项', '与当前安装相同']], [13.3, ['已选 21 项', '移除 1 项']], [14.3, ['已选 20 项', '移除 2 项']]];
+  let fi = 0; FS.forEach((f, i) => { if (t >= f[0]) fi = i; });
+  const rp = fi ? prog(t, FS[fi][0], FS[fi][0] + .32, 'cOut') : 1;
+  const fa = main.q('.fa'), fb = main.q('.fb');
+  setFooter(main, FS[fi][1][0], FS[fi][1][1], 1 - prog(t, 13.3, 13.55, 'cOut'));
+  fa.style.transform = `translateY(${(1 - rp) * 22}px)`; fa.style.opacity = rp;
+  if (fi && rp < 1) {
+    main.q('[data-f1b]').textContent = FS[fi - 1][1][0]; main.q('[data-f2b]').textContent = FS[fi - 1][1][1];
+    fb.style.transform = `translateY(${-rp * 22}px)`; fb.style.opacity = 1 - rp;
+  } else fb.style.opacity = 0;
+  const bp = prog(t, 41.7, 41.78, 'cOut') * (1 - prog(t, 41.78, 42.05, 'cOut'));
+  main.q('[data-btn]').style.transform = `scale(${1 - bp * .07})`;
+  main.q('[data-btn]').style.filter = `brightness(${1 + bp * .25})`;
+
+  // 水下：单选
+  const wsel = step(t, [[0, 'w2'], [17.6, 'w0'], [18.3, 'w2']]);
+  const wt = t >= 18.3 ? 18.3 : t >= 17.6 ? 17.6 : -9;
+  ['w0', 'w1', 'w2'].forEach(k => {
+    const el = main.q(`[data-rck="${k}"]`), p = k === wsel ? E.back(clamp((t - wt) / .3)) : 0;
+    el.style.opacity = k === wsel ? 1 : 0; el.style.transform = `scale(${k === wsel ? (wt < 0 ? 1 : p) : 0})`;
+  });
+
+  // 悬停
+  const HOV = { w0: [[17.45, 18.1]], w2: [[18.1, 19.8]], c0: [[32.8, 33.3]], c1: [[33.3, 33.8]], c2: [[33.8, 34.3]], c3: [[34.3, 34.9]],
+    p0: [[22.15, 22.75]], p1: [[22.55, 23.15]], p2: [[22.95, 23.55]], p3: [[23.35, 23.95]], p4: [[23.75, 24.4]] };
+  for (const k in HOV) {
+    const h = main.q(`[data-hov="${k}"] .hov`);
+    const o = HOV[k].reduce((m, [a, b]) => Math.max(m, prog(t, a, a + .12) * (1 - prog(t, b - .12, b))), 0);
+    h.style.opacity = o * .055;
+  }
+  const rh = main.q('[data-restore] .hov'); rh.style.opacity = prog(t, 9.0, 9.15) * (1 - prog(t, 10.8, 10.95)) * .055;
+
+  // 取色器
+  applyColor(main, hsvAt(t));
+  ['c0', 'c1', 'c2'].forEach(() => {});
+  main.qa('[data-sw]').forEach(s => {
+    const i = +s.dataset.sw, tc = i === 8 ? 28.3 : i === 4 ? 28.9 : -9;
+    const p = prog(t, tc, tc + .08) * (1 - prog(t, tc + .08, tc + .3, 'cOut'));
+    s.style.transform = `scale(${1 - p * .2})`;
+  });
+
+  // 导入：拖拽
+  const file = document.getElementById('file');
+  const fOn = t >= 35.9 && t < 37.5;
+  file.style.display = fOn ? 'block' : 'none';
+  if (fOn) {
+    const [x, y] = fileAt(t), drop = prog(t, 37.15, 37.45, 'cIn');
+    const tilt = (1 - prog(t, 35.9, 36.9, 'cOut')) * 18;
+    file.style.left = x + 'px'; file.style.top = y + 'px';
+    file.style.transform = `rotate(${tilt}deg) scale(${(1 - drop * .65) * (1 + (1 - prog(t, 35.9, 36.3, 'back')) * .3)})`;
+    file.style.opacity = (1 - drop) * prog(t, 35.9, 36.05);
+  }
+  const hl = prog(t, 36.45, 36.7) * (1 - prog(t, 37.45, 37.8));
+  const dz = main.q('[data-drop]');
+  dz.style.borderColor = `color-mix(in srgb, #0a84ff ${hl * 100}%, #56565b)`;
+  dz.style.background = `color-mix(in srgb, #0f2a48 ${hl * 100}%, #2c2c2e)`;
+  dz.querySelector('.dropic').style.transform = `translateY(${hl * 6 + Math.sin(Math.max(0, t - 36.45) * 9) * 2 * hl}px) scale(${1 + hl * .12})`;
+
+  // 光标
+  const curEl = document.getElementById('cur');
+  const vis = CUR_VIS.reduce((m, [a, b]) => Math.max(m, prog(t, a, a + .15) * (1 - prog(t, b - .15, b))), 0);
+  curEl.style.opacity = vis;
+  if (vis > 0) {
+    const [x, y] = cursorAt(t);
+    const pressed = CLICKS.reduce((m, tc) => Math.max(m, prog(t, tc - .06, tc) * (1 - prog(t, tc + .04, tc + .14))), 0)
+      || (PRESS.some(([a, b]) => t >= a && t <= b) ? 1 : 0);
+    curEl.style.transform = `translate(${x - 2}px,${y - 2}px) scale(${1 - pressed * .14})`;
+  }
+  const rip = document.getElementById('rip');
+  const lc = CLICKS.filter(tc => t >= tc && t < tc + .45).pop();
+  if (lc != null && vis > 0) {
+    const p = (t - lc) / .45, [x, y] = cursorAt(lc), r = 6 + E.cOut(p) * 26;
+    rip.style.display = 'block';
+    rip.style.left = (x - r) + 'px'; rip.style.top = (y - r) + 'px'; rip.style.width = rip.style.height = 2 * r + 'px';
+    rip.style.opacity = (1 - p) * .85;
+  } else rip.style.display = 'none';
+
+  // 九宫格
+  clones.forEach(({ a, c: col, r, d }) => {
+    const p = E.cOut(clamp((t - 42.05 - d * .18) / .7));
+    a.el.style.opacity = p;
+    a.el.style.transform = `translate3d(${col * 1290}px,${r * 1080}px,${(1 - p) * -900}px)`;
+    a.el.style.display = p > 0 ? 'block' : 'none';
+  });
+
+}
+
+window.DURATION = DURATION;
+window.renderFrame = renderFrame;
+// 预热字体：所有文字都在 DOM 里（opacity 渲染），等字体就绪
+window.ready = (async () => {
+  document.querySelectorAll('.page').forEach(p => (p.style.opacity = 1));
+  await document.fonts.ready;
+  await new Promise(r => setTimeout(r, 300));
+  await document.fonts.ready;
+  renderFrame(0);
+  return true;
+})();
+const qs = new URLSearchParams(location.search);
+if (qs.has('t')) window.ready.then(() => renderFrame(+qs.get('t')));
+</script>
+</body>
+</html>
