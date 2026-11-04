@@ -1740,7 +1740,7 @@ end
 
 function rh.readable(address, size)
     local mbi = rh.mbi
-    if address < 0x10000 or lang.k32.VirtualQuery(ffi.cast("const void*", address), ffi.cast("void*", mbi), ffi.sizeof(mbi)) == 0 then return false end
+    if address < 0x10000 or ffi.C.VirtualQuery(ffi.cast("const void*", address), mbi, ffi.sizeof(mbi)) == 0 then return false end
     local protect = tonumber(mbi.protect)
     return tonumber(mbi.state) == 0x1000 and bit.band(protect, 0x101) == 0 and bit.band(protect, 0xEE) ~= 0
         and address + size <= tonumber(ffi.cast("uintptr_t", mbi.base)) + tonumber(mbi.region_size)
@@ -2513,306 +2513,64 @@ end
 
 
 -- In-game language switcher: a row injected into the Panorama settings page.
--- Hot switch reloads csgo_<lang>.txt through ILocalize; the choice is saved to the database
--- (re-applied on every load) and to the Steam appmanifest (used on the next launch).
+-- Reloads resource/csgo_<lang>.txt through the game's ILocalize interface; the choice is saved
+-- in the gamesense database and re-applied every time the script loads.
 lang.db_key, lang.interval, lang.host_wait = "unoins_language", 0.25, 30
-lang.by_code, lang.available, lang.files, lang.items, lang.status = {}, {}, {}, "", ""
+lang.by_code, lang.items, lang.status = {}, "", ""
+-- Languages CS:GO ships (Steam API codes).
 lang.catalog = {
     {"english", "English"}, {"schinese", "简体中文"}, {"tchinese", "繁體中文"}, {"japanese", "日本語"},
     {"koreana", "한국어"}, {"thai", "ไทย"}, {"bulgarian", "Български"}, {"czech", "Čeština"},
     {"danish", "Dansk"}, {"german", "Deutsch"}, {"spanish", "Español - España"}, {"latam", "Español - Latinoamérica"},
-    {"greek", "Ελληνικά"}, {"french", "Français"}, {"italian", "Italiano"}, {"indonesian", "Bahasa Indonesia"},
-    {"hungarian", "Magyar"}, {"dutch", "Nederlands"}, {"norwegian", "Norsk"}, {"polish", "Polski"},
-    {"portuguese", "Português"}, {"brazilian", "Português - Brasil"}, {"romanian", "Română"}, {"russian", "Русский"},
-    {"finnish", "Suomi"}, {"swedish", "Svenska"}, {"turkish", "Türkçe"}, {"vietnamese", "Tiếng Việt"},
-    {"ukrainian", "Українська"}, {"arabic", "العربية"}
+    {"greek", "Ελληνικά"}, {"french", "Français"}, {"italian", "Italiano"}, {"hungarian", "Magyar"},
+    {"dutch", "Nederlands"}, {"norwegian", "Norsk"}, {"polish", "Polski"}, {"portuguese", "Português"},
+    {"brazilian", "Português - Brasil"}, {"romanian", "Română"}, {"russian", "Русский"}, {"finnish", "Suomi"},
+    {"swedish", "Svenska"}, {"turkish", "Türkçe"}, {"vietnamese", "Tiếng Việt"}, {"ukrainian", "Українська"}
 }
--- kernel32 functions used below, as function pointer types. Pointer arguments are void* so a
--- declaration made by another script (e.g. with WIN32_FIND_DATAA*) stays call-compatible.
-lang.k32_types = {
-    GetModuleFileNameA = "uint32_t(__stdcall*)(void*, char*, uint32_t)",
-    GetCommandLineA = "const char*(__stdcall*)(void)",
-    GetFileAttributesA = "uint32_t(__stdcall*)(const char*)",
-    FindFirstFileA = "void*(__stdcall*)(const char*, void*)",
-    FindNextFileA = "int(__stdcall*)(void*, void*)",
-    FindClose = "int(__stdcall*)(void*)",
-    CreateFileA = "void*(__stdcall*)(const char*, uint32_t, uint32_t, void*, uint32_t, uint32_t, void*)",
-    ReadFile = "int(__stdcall*)(void*, void*, uint32_t, uint32_t*, void*)",
-    WriteFile = "int(__stdcall*)(void*, const char*, uint32_t, uint32_t*, void*)",
-    GetFileSize = "uint32_t(__stdcall*)(void*, uint32_t*)",
-    CloseHandle = "int(__stdcall*)(void*)",
-    CopyFileA = "int(__stdcall*)(const char*, const char*, int)",
-    MoveFileExA = "int(__stdcall*)(const char*, const char*, uint32_t)",
-    DeleteFileA = "int(__stdcall*)(const char*)",
-    WideCharToMultiByte = "int(__stdcall*)(uint32_t, uint32_t, const uint16_t*, int, char*, int, const char*, int*)",
-    VirtualQuery = "size_t(__stdcall*)(const void*, void*, size_t)"
-}
-lang.cdef_errors, lang.modules = {}, {}
-for name, ctype in pairs(lang.k32_types) do
-    local ok, err = pcall(ffi.cdef, (ctype:gsub("%(__stdcall%*%)", " __stdcall " .. name, 1)) .. ";")
-    if not ok and not tostring(err):find("redefine", 1, true) then lang.cdef_errors[#lang.cdef_errors + 1] = name .. ": " .. tostring(err) end
-end
-
--- Mapped PE32 image of a loaded module. client.find_signature only searches code, so take any match
--- inside the module and walk back on 64 KiB boundaries (module bases are 64 KiB aligned) to the
--- "MZ"/"PE" headers. Every address read lies between the base and the match, i.e. inside the image.
-function lang.image(module)
-    local cached = lang.modules[module]
-    if cached ~= nil then return cached or nil end
-    lang.modules[module] = false
-    local hit = client.find_signature(module, "\x55\x8B\xEC")
-    if not hit then return nil end
-    local address = tonumber(ffi.cast("uintptr_t", hit))
-    address = address - address % 0x10000
-    for _ = 1, 1024 do
-        if address <= 0 then break end
-        local p = ffi.cast("const uint8_t*", address)
-        if p[0] == 0x4D and p[1] == 0x5A then
-            local lfanew = ffi.cast("const int32_t*", p + 0x3C)[0]
-            if lfanew > 0 and lfanew < 0x1000 and ffi.cast("const uint32_t*", p + lfanew)[0] == 0x4550
-                and ffi.cast("const uint16_t*", p + lfanew + 24)[0] == 0x10B then
-                local image = {u8 = p, lfanew = lfanew, size = ffi.cast("const uint32_t*", p + lfanew + 0x50)[0]}
-                lang.modules[module] = image
-                return image
-            end
-        end
-        address = address - 0x10000
+do
+    local items = {}
+    for _, entry in ipairs(lang.catalog) do
+        lang.by_code[entry[1]] = entry
+        items[#items + 1] = entry[1] .. "=" .. entry[2]
     end
-    return nil
+    lang.items = table.concat(items, "|")
 end
-
--- Addresses the loader wrote into a module's import table for the wanted kernel32 functions.
-function lang.imports(module, wanted)
-    local found, image = {}, lang.image(module)
-    if not image then return found end
-    local u8, size = image.u8, image.size
-    local function u32(rva)
-        if rva < 0 or rva + 4 > size then error("import table outside the image") end
-        return ffi.cast("const uint32_t*", u8 + rva)[0]
-    end
-    local function name_at(rva) return rva > 0 and rva < size and ffi.string(u8 + rva) or nil end
-    local dir = u32(image.lfanew + 0x80)
-    if dir == 0 then return found end
-    for descriptor = dir, dir + 20 * 1023, 20 do
-        local dll_rva = u32(descriptor + 12)
-        if dll_rva == 0 then break end
-        local dll = (name_at(dll_rva) or ""):lower()
-        local names, slots = u32(descriptor), u32(descriptor + 16)
-        if names ~= 0 and (dll == "kernel32.dll" or dll:find("^api%-ms%-win%-core%-libraryloader")) then
-            for i = 0, 4095 do
-                local entry = u32(names + i * 4)
-                if entry == 0 then break end
-                local fn = entry < 0x80000000 and name_at(entry + 2)
-                if fn and wanted[fn] then found[fn] = u32(slots + i * 4) end
-            end
-        end
-    end
-    return found
-end
-
--- GetModuleHandleA / GetProcAddress as imported by a game module; every other kernel32 function is looked up through them.
-function lang.loader()
-    if lang.loader_state ~= nil then return lang.loader_state or nil end
-    lang.loader_state, lang.loader_note = false, "no GetProcAddress/GetModuleHandleA import found"
-    for _, module in ipairs({"engine.dll", "client.dll", "tier0.dll", "vstdlib.dll", "materialsystem.dll"}) do
-        local ok, found = pcall(lang.imports, module, {GetProcAddress = true, GetModuleHandleA = true})
-        if not ok then
-            lang.loader_note = module .. ": " .. tostring(found)
-        elseif found.GetProcAddress and found.GetModuleHandleA then
-            local get_module = ffi.cast("void*(__stdcall*)(const char*)", found.GetModuleHandleA)
-            local get_proc = ffi.cast("void*(__stdcall*)(void*, const char*)", found.GetProcAddress)
-            local kernel32 = get_module("kernel32.dll")
-            if kernel32 ~= nil then
-                lang.loader_state = {proc = get_proc, kernel32 = kernel32, from = module}
-                return lang.loader_state
-            end
-            lang.loader_note = module .. ": GetModuleHandleA(kernel32.dll) returned NULL"
-        end
-    end
-    return nil
-end
-
--- lang.k32.Name: the ffi.C declaration when it works, otherwise GetProcAddress(kernel32, Name).
-lang.k32 = setmetatable({}, {__index = function(t, name)
-    local ctype = lang.k32_types[name]
-    if not ctype then error("unknown kernel32 function " .. tostring(name)) end
-    local ok, fn = pcall(function() return ffi.C[name] end)
-    if not ok or fn == nil then
-        local loader = lang.loader()
-        local address = loader and loader.proc(loader.kernel32, name)
-        if address == nil then
-            error("kernel32." .. name .. " unavailable (ffi.C: " .. tostring(fn) .. "; loader: "
-                .. (loader and "GetProcAddress returned NULL via " .. loader.from or tostring(lang.loader_note))
-                .. (lang.cdef_errors[1] and "; cdef: " .. lang.cdef_errors[1] or "") .. ")")
-        end
-        fn = ffi.cast(ctype, address)
-    end
-    rawset(t, name, fn)
-    return fn
-end})
-
-function lang.handle_ok(h)
-    return h ~= nil and tonumber(ffi.cast("intptr_t", h)) ~= -1
-end
-
-function lang.exists(path)
-    local attributes = tonumber(lang.k32.GetFileAttributesA(path))
-    return attributes ~= nil and attributes ~= 0xFFFFFFFF and bit.band(attributes, 0x10) == 0
-end
-
-function lang.list(pattern)
-    -- WIN32_FIND_DATAA (320 bytes): dwFileAttributes at 0, cFileName[260] at 44.
-    local names, data = {}, ffi.new("uint8_t[320]")
-    local h = lang.k32.FindFirstFileA(pattern, ffi.cast("void*", data))
-    if not lang.handle_ok(h) then return names end
-    repeat
-        if bit.band(ffi.cast("uint32_t*", data)[0], 0x10) == 0 then names[#names + 1] = ffi.string(data + 44) end
-    until #names >= 256 or not util.pressed(lang.k32.FindNextFileA(h, ffi.cast("void*", data)))
-    lang.k32.FindClose(h)
-    return names
-end
-
-function lang.read_file(path, limit)
-    local h = lang.k32.CreateFileA(path, 0x80000000, 3, nil, 3, 0x80, nil)
-    if not lang.handle_ok(h) then return nil, "cannot open " .. path end
-    local ok, data = pcall(function()
-        local size = tonumber(lang.k32.GetFileSize(h, nil))
-        if not size or size == 0xFFFFFFFF or size > (limit or 16777216) then error("invalid size: " .. path) end
-        if size == 0 then return "" end
-        local buffer, got = ffi.new("uint8_t[?]", size), ffi.new("uint32_t[1]")
-        if not util.pressed(lang.k32.ReadFile(h, buffer, size, got, nil)) or got[0] ~= size then error("read failed: " .. path) end
-        return ffi.string(buffer, size)
-    end)
-    lang.k32.CloseHandle(h)
-    if not ok then return nil, data end
-    return data
-end
-
-function lang.write_file(path, data)
-    local h = lang.k32.CreateFileA(path, 0x40000000, 0, nil, 2, 0x80, nil)
-    if not lang.handle_ok(h) then return false end
-    local written = ffi.new("uint32_t[1]")
-    local ok = util.pressed(lang.k32.WriteFile(h, data, #data, written, nil)) and written[0] == #data
-    lang.k32.CloseHandle(h)
-    return ok
-end
-
-function lang.utf8(wide, count)
-    local size = lang.k32.WideCharToMultiByte(65001, 0, wide, count, nil, 0, nil, nil)
-    if size <= 0 then return nil end
-    local out = ffi.new("char[?]", size)
-    size = lang.k32.WideCharToMultiByte(65001, 0, wide, count, out, size, nil, nil)
-    if size <= 0 then return nil end
-    return ffi.string(out, count < 0 and size - 1 or size)
-end
-
--- Localization files are UTF-16LE with a BOM; fall back to UTF-8 otherwise.
-function lang.decode(raw)
-    local b1, b2 = raw:byte(1, 2)
-    if b1 == 0xFF and b2 == 0xFE then
-        local count = math.floor((#raw - 2) / 2)
-        if count <= 0 then return "" end
-        return lang.utf8(ffi.cast("const uint16_t*", ffi.cast("const char*", raw) + 2), count)
-    end
-    if raw:sub(1, 3) == "\239\187\191" then return raw:sub(4) end
-    return raw
-end
-
-function lang.paths()
-    local buffer = ffi.new("char[520]")
-    local n = tonumber(lang.k32.GetModuleFileNameA(nil, buffer, 520)) or 0
-    if n <= 0 or n >= 520 then return nil end
-    local root = ffi.string(buffer, n):match("^(.*)[\\/][^\\/]+$")
-    if not root then return nil end
-    local p = {root = root, resource = root .. "\\csgo\\resource\\", platform = root .. "\\platform\\resource\\"}
-    local common, installdir = root:match("^(.*)[\\/]([^\\/]+)$")
-    local steamapps, folder
-    if common then steamapps, folder = common:match("^(.*)[\\/]([^\\/]+)$") end
-    if folder and folder:lower() == "common" then p.steamapps, p.installdir = steamapps, installdir end
-    return p
-end
-
--- Every "<prefix>_english.txt" in the game and platform resource folders is a localization file to swap.
-function lang.scan_files(p)
-    local files = {}
-    for _, source in ipairs({{p.resource, "GAME"}, {p.platform, "PLATFORM"}}) do
-        for _, name in ipairs(lang.list(source[1] .. "*_english.txt")) do
-            local prefix = name:lower():match("^([%w_]+)_english%.txt$")
-            if prefix and not prefix:find("^closecaption") and not prefix:find("^subtitles") then
-                files[#files + 1] = {prefix = prefix, dir = source[1], path_id = source[2]}
-            end
-        end
-    end
-    table.sort(files, function(a, b)
-        if (a.prefix == "csgo") ~= (b.prefix == "csgo") then return a.prefix == "csgo" end
-        return a.dir .. a.prefix < b.dir .. b.prefix
-    end)
-    return files
-end
-
-function lang.manifest_path()
-    if lang.manifest ~= nil then return lang.manifest or nil end
-    lang.manifest = false
-    local p = lang.dirs
-    if not p or not p.steamapps then return nil end
-    local want = p.installdir:lower()
-    for _, name in ipairs(lang.list(p.steamapps .. "\\appmanifest_*.acf")) do
-        local path = p.steamapps .. "\\" .. name
-        local text = lang.read_file(path, 1048576)
-        local dir = text and text:match('"installdir"%s*"([^"]*)"')
-        if dir and dir:lower() == want then
-            lang.manifest = path
-            break
-        end
-    end
-    return lang.manifest or nil
-end
-
--- Language the game was started with: -language launch option, then the Steam manifest, then cl_language.
-function lang.detect()
-    local line = lang.k32.GetCommandLineA()
-    local arg = line ~= nil and ffi.string(line):lower():match("%-language%s+\"?([%a]+)")
-    if arg and lang.by_code[arg] then return arg end
-    local manifest = lang.manifest_path()
-    local text = manifest and lang.read_file(manifest, 1048576)
-    local code = text and text:match('"UserConfig"%s*{[^}]-"language"%s*"([^"]*)"')
-    if code and lang.by_code[code:lower()] then return code:lower() end
-    local ok, value = pcall(function() return cvar.cl_language:get_string() end)
-    if ok and type(value) == "string" and lang.by_code[value:lower()] then return value:lower() end
-    return "english"
-end
+-- Round-end notices: present in every csgo_<lang>.txt and translated in each.
+lang.probe_tokens = {"SFUI_Notice_Terrorists_Win", "SFUI_Notice_CTs_Win", "SFUI_Notice_Target_Bombed",
+    "SFUI_Notice_Bomb_Defused", "SFUI_Notice_Round_Draw"}
 
 function lang.fail(reason)
     lang.disabled = true
     client.error_log("[Ünoins_qucy] Language switcher disabled: " .. tostring(reason))
 end
 
+-- Language the game is running in, as far as the engine reports it.
+function lang.detect()
+    local ok, value = pcall(function() return cvar.cl_language:get_string() end)
+    if ok and type(value) == "string" and lang.by_code[value:lower()] then return value:lower() end
+    return "english"
+end
+
 function lang.init()
     lang.ready = true
-    local ok, err = pcall(function()
-        local p = lang.paths()
-        if not p then error("game directory not found") end
-        lang.dirs, lang.files = p, lang.scan_files(p)
-        local items = {}
-        for _, entry in ipairs(lang.catalog) do
-            if lang.exists(p.resource .. "csgo_" .. entry[1] .. ".txt") then
-                lang.available[#lang.available + 1] = entry
-                lang.by_code[entry[1]] = entry
-                items[#items + 1] = entry[1] .. "=" .. entry[2]
-            end
-        end
-        if #lang.available == 0 then error("no csgo_<language>.txt in " .. p.resource) end
-        lang.items = table.concat(items, "|")
-    end)
-    if not ok then return lang.fail(err) end
-    local detected, current = pcall(lang.detect)
-    lang.current = detected and current or "english"
+    lang.current = lang.detect()
     lang.selected, lang.status = lang.current, "Active"
     local saved = database.read(lang.db_key)
     if type(saved) == "string" and lang.by_code[saved] then
         lang.selected = saved
         if saved ~= lang.current then lang.auto = saved end
     end
+end
+
+-- Reads a NUL-terminated UTF-16 string owned by the game; only used to compare values.
+function lang.wide(ptr)
+    local out = {}
+    for i = 0, 511 do
+        local c = ptr[i]
+        if c == 0 then break end
+        out[#out + 1] = c
+    end
+    return table.concat(out, ",")
 end
 
 -- ILocalize (localize.dll, Localize_001): IAppSystem takes indices 0-8, then AddFile 9, RemoveAll 10, Find 11.
@@ -2827,12 +2585,12 @@ function lang.api()
         local remove_all = ffi.cast("void(__thiscall*)(void*)", vtable[10])
         local find = ffi.cast("const uint16_t*(__thiscall*)(void*, const char*)", vtable[11])
         return {
-            add_file = function(path, path_id) return add_file(this, path, path_id, false) end,
+            add_file = function(code) return add_file(this, "resource/csgo_" .. code .. ".txt", "GAME", false) == true end,
             remove_all = function() remove_all(this) end,
             find = function(token)
                 local wide = find(this, token)
                 if wide == nil then return nil end
-                return lang.utf8(wide, -1)
+                return lang.wide(wide)
             end
         }
     end)
@@ -2841,104 +2599,45 @@ function lang.api()
     return lang.localize or nil
 end
 
--- Tokens from the target file whose loaded value differs today; used to verify the swap really happened.
-function lang.probes(api, code)
-    local raw = lang.read_file(lang.dirs.resource .. "csgo_" .. code .. ".txt")
-    local text = raw and lang.decode(raw)
-    if not text then return nil, 0 end
-    local probes, same, lines = {}, 0, 0
-    for line in text:gmatch("[^\n]+") do
-        lines = lines + 1
-        local key, value = line:match('^%s*"([%w_]+)"%s+"([^"\\%%]*)"')
-        if key and key:lower() ~= "language" and #value >= 2 and #value <= 80 then
-            local current = api.find(key)
-            if current == value then
-                same = same + 1
-            elseif current then
-                probes[#probes + 1] = {key, value}
-            end
-        end
-        if #probes >= 8 or lines >= 6000 then break end
+function lang.snapshot(api)
+    local values, known = {}, 0
+    for i, token in ipairs(lang.probe_tokens) do
+        values[i] = api.find(token) or ""
+        if values[i] ~= "" then known = known + 1 end
     end
-    return probes, same
+    return table.concat(values, "|"), known
 end
 
-function lang.verified(api, probes)
-    local hits = 0
-    for _, probe in ipairs(probes) do
-        if api.find(probe[1]) == probe[2] then hits = hits + 1 end
-    end
-    return hits * 2 >= #probes
-end
-
-function lang.add_all(api, code)
-    local added = 0
-    for _, f in ipairs(lang.files) do
-        local name = f.prefix .. "_" .. code .. ".txt"
-        if lang.exists(f.dir .. name) and util.pressed(api.add_file("resource/" .. name, f.path_id)) then added = added + 1 end
-    end
-    return added
-end
-
--- Overlay the target files first; if existing strings are not replaced, rebuild the table
--- with the target language first and English after it as the fallback for missing tokens.
+-- Whether AddFile replaces strings that are already loaded is detected at runtime:
+-- overlay the target file; if nothing changed, add English on top. If English changes the strings,
+-- files overwrite (the target was already active, so restore it); if not, the first loaded value
+-- wins, so rebuild the table with the target first and English after it as the fallback.
 function lang.hot_swap(code)
     local api = lang.api()
     if not api then return false, "ILocalize unavailable" end
-    local probes, same = lang.probes(api, code)
-    if probes and #probes == 0 and same > 0 then return true, "already active" end
-    if lang.add_all(api, code) == 0 then return false, "AddFile failed" end
-    if not probes or #probes == 0 then return true, "loaded, unverified" end
-    if lang.verified(api, probes) then return true, "overlay" end
-    api.remove_all()
-    local added = lang.add_all(api, code)
-    if code ~= "english" then added = added + lang.add_all(api, "english") end
-    if added == 0 then lang.add_all(api, lang.current or "english") end
-    if lang.verified(api, probes) then return true, "rebuilt" end
-    return false, "strings did not change"
-end
-
--- Sets "language" in UserConfig (and MountedConfig when present, so Steam does not queue a language download).
-function lang.acf_language(text, code)
-    if not text:find('"AppState"', 1, true) then return nil end
-    local function set_block(src, name, insert)
-        local _, open = src:find('"' .. name .. '"%s*{')
-        if not open then return src, false end
-        local close = src:find("}", open + 1, true)
-        if not close then return src, false end
-        local block = src:sub(open + 1, close - 1)
-        local updated, n = block:gsub('("language"%s*")[^"]*(")', "%1" .. code .. "%2", 1)
-        if n == 0 then
-            if not insert then return src, true end
-            updated = block:gsub("%s*$", "") .. '\n\t\t"language"\t\t"' .. code .. '"\n\t'
+    local before, known = lang.snapshot(api)
+    if not api.add_file(code) then return false, "not installed" end
+    if known == 0 then return true, "loaded, unverified" end
+    local overlaid = lang.snapshot(api)
+    if overlaid ~= before then return true, "overlay" end
+    -- For English the probe below cannot tell the two behaviours apart, and a rebuild with
+    -- only the English file is correct under either one.
+    if code ~= "english" then
+        api.add_file("english")
+        if lang.snapshot(api) ~= overlaid then
+            api.add_file(code)
+            return true, "already active"
         end
-        return src:sub(1, open) .. updated .. src:sub(close), true
     end
-    local out, found = set_block(text, "UserConfig", true)
-    if not found then
-        local last = out:match(".*()}")
-        if not last then return nil end
-        out = out:sub(1, last - 1) .. '\t"UserConfig"\n\t{\n\t\t"language"\t\t"' .. code .. '"\n\t}\n' .. out:sub(last)
+    api.remove_all()
+    api.add_file(code)
+    if code ~= "english" then api.add_file("english") end
+    local rebuilt, now_known = lang.snapshot(api)
+    if now_known == 0 then
+        api.add_file(lang.current or "english")
+        return false, "strings missing after reload"
     end
-    return (set_block(out, "MountedConfig", false))
-end
-
-function lang.write_manifest(code)
-    local path = lang.manifest_path()
-    if not path then return false, "appmanifest not found" end
-    local text, err = lang.read_file(path, 1048576)
-    if not text then return false, err end
-    local updated = lang.acf_language(text, code)
-    if not updated then return false, "unexpected appmanifest format" end
-    if updated == text then return true, "unchanged" end
-    lang.k32.CopyFileA(path, path .. ".unoins_bak", 1)
-    local temp = path .. ".unoins_tmp"
-    if not lang.write_file(temp, updated) then return false, "write failed" end
-    if not util.pressed(lang.k32.MoveFileExA(temp, path, 0x9)) then
-        lang.k32.DeleteFileA(temp)
-        return false, "replace failed"
-    end
-    return true, "written"
+    return true, rebuilt ~= before and "rebuilt" or "already active"
 end
 
 function lang.apply(code, persist)
@@ -2946,19 +2645,16 @@ function lang.apply(code, persist)
     if not entry then return end
     local ok, swapped, detail = pcall(lang.hot_swap, code)
     if not ok then swapped, detail = false, swapped end
-    lang.selected = code
     if swapped then
-        lang.current = code
+        lang.current, lang.selected = code, code
         pcall(function() cvar.cl_language:set_string(code) end)
+        if persist then database.write(lang.db_key, code) end
+        lang.status = detail == "already active" and "Active" or "Applied · reopen pages to refresh"
+    else
+        lang.selected = lang.current
+        lang.status = detail == "not installed" and entry[2] .. " is not installed" or "Switch failed"
     end
-    local note = ""
-    if persist then
-        database.write(lang.db_key, code)
-        local mok, written, why = pcall(lang.write_manifest, code)
-        note = mok and written and " · manifest " .. why or " · manifest not saved: " .. tostring(mok and why or written)
-    end
-    lang.status = swapped and (detail == "already active" and "Active" or "Applied · reopen pages to refresh") or "Restart CS:GO to apply"
-    style.log(string.format("language %s: %s%s", entry[2], swapped and detail or "hot switch failed (" .. tostring(detail) .. ")", note))
+    style.log(string.format("language %s: %s", entry[2], swapped and detail or "failed (" .. tostring(detail) .. ")"))
 end
 
 lang.js = [[
