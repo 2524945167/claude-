@@ -1974,34 +1974,66 @@ end
 
 dormant.prev, dormant.round_start, dormant.snipers = {}, 0, {[9] = true, [40] = true, [11] = true, [38] = true}
 dormant.min_alpha, dormant.duck_scale, dormant.spread_scale, dormant.stop_ratio, dormant.steady_ratio = 0.795, 2.94117647, 600, 0.33, 0.34
-dormant.vtable = {entity_list = 3, is_weapon = 165, inaccuracy = 482}
+-- inaccuracy: C_WeaponCSBase::GetInaccuracy; some builds use 483. If shooting dormant targets crashes the game, try 483.
+dormant.vtable = {entity_list = 3, inaccuracy = 482}
 dormant.group_of = {[1] = 3, [64] = 4, [40] = 5, [9] = 6, [11] = 7, [38] = 7}
 for group, ids in pairs({[2] = {2, 3, 4, 30, 32, 36, 61, 63}, [8] = {7, 8, 10, 13, 16, 39, 60}, [9] = {17, 19, 23, 24, 26, 33, 34}, [10] = {14, 25, 27, 28, 29, 35}}) do
     for _, id in ipairs(ids) do dormant.group_of[id] = group end
 end
+
+function util.vtable_entry(instance, index, ctype)
+    return ffi.cast(ctype, ffi.cast("void***", instance)[0][index])
+end
+
+-- Binds a virtual function of an engine interface; the interface pointer is passed as `this`.
+function util.vtable_bind(modules, interface, index, typestring)
+    local instance
+    for _, module in ipairs(modules) do
+        instance = client.create_interface(module, interface)
+        if instance then break end
+    end
+    if not instance then error("interface not found: " .. interface) end
+    local fn = util.vtable_entry(instance, index, ffi.typeof(typestring))
+    return function(...) return fn(instance, ...) end
+end
+
+-- Calls a virtual function on an arbitrary object pointer passed as the first argument.
+function util.vtable_thunk(index, typestring)
+    local ctype = ffi.typeof(typestring)
+    return function(instance, ...) return util.vtable_entry(instance, index, ctype)(instance, ...) end
+end
+
 do
     local vt = dormant.vtable
     local ok, native_fn = pcall(function()
         return {
-            entity = vtable_bind("client_panorama.dll", "VClientEntityList003", vt.entity_list, "void*(__thiscall*)(void*,int)"),
-            is_weapon = vtable_thunk(vt.is_weapon, "bool(__thiscall*)(void*)"),
-            inaccuracy = vtable_thunk(vt.inaccuracy, "float(__thiscall*)(void*)"),
+            -- client_panorama.dll was renamed to client.dll in 2021; keep the old name as a fallback.
+            entity = util.vtable_bind({"client.dll", "client_panorama.dll"}, "VClientEntityList003", vt.entity_list, "void*(__thiscall*)(void*, int)"),
+            inaccuracy = util.vtable_thunk(vt.inaccuracy, "float(__thiscall*)(void*)"),
         }
     end)
     dormant.native = ok and native_fn or nil
 end
 
+-- Only called with the local player's gun (dormant.command checks dormant.is_gun first),
+-- so no virtual IsWeapon call is needed.
 function dormant.read_inaccuracy(weapon)
-    local n = dormant.native
-    local ptr = n.entity(weapon)
-    if ptr == nil or not n.is_weapon(ptr) then return nil end
-    return n.inaccuracy(ptr)
+    local ptr = dormant.native.entity(weapon)
+    if ptr == nil then return nil end
+    return dormant.native.inaccuracy(ptr)
 end
 
+-- A value outside [0, 1] means the vtable index is wrong for this build: stop using it.
 function dormant.inaccuracy(weapon)
-    if not dormant.native then return nil end
+    if not dormant.native or dormant.inaccuracy_broken then return nil end
     local ok, value = pcall(dormant.read_inaccuracy, weapon)
-    return ok and tonumber(value) or nil
+    value = ok and tonumber(value) or nil
+    if value ~= nil and not (util.finite(value) and value >= 0 and value <= 1) then
+        dormant.inaccuracy_broken = true
+        client.error_log("[Ünoins_qucy] Weapon inaccuracy read returned " .. tostring(value) .. "; using the movement-based fallback.")
+        return nil
+    end
+    return value
 end
 
 function dormant.is_gun(class)
