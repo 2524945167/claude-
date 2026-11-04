@@ -2549,7 +2549,7 @@ end
 function lang.init()
     lang.ready = true
     lang.current = lang.detect()
-    lang.selected, lang.status = lang.current, "Active"
+    lang.selected, lang.status = lang.current, ""
     local saved = database.read(lang.db_key)
     if type(saved) == "string" and lang.by_code[saved] then
         lang.selected = saved
@@ -2557,15 +2557,28 @@ function lang.init()
     end
 end
 
--- Reads a NUL-terminated UTF-16 string owned by the game; only used to compare values.
+-- Converts a NUL-terminated UTF-16 string owned by the game to UTF-8 (at most 1024 code units).
 function lang.wide(ptr)
-    local out = {}
-    for i = 0, 511 do
+    local out, i = {}, 0
+    while i < 1024 do
         local c = ptr[i]
         if c == 0 then break end
-        out[#out + 1] = c
+        i = i + 1
+        if c >= 0xD800 and c <= 0xDBFF then
+            local low = ptr[i]
+            if low >= 0xDC00 and low <= 0xDFFF then c, i = 0x10000 + (c - 0xD800) * 0x400 + (low - 0xDC00), i + 1 end
+        end
+        if c < 0x80 then
+            out[#out + 1] = string.char(c)
+        elseif c < 0x800 then
+            out[#out + 1] = string.char(0xC0 + math.floor(c / 0x40), 0x80 + c % 0x40)
+        elseif c < 0x10000 then
+            out[#out + 1] = string.char(0xE0 + math.floor(c / 0x1000), 0x80 + math.floor(c / 0x40) % 0x40, 0x80 + c % 0x40)
+        else
+            out[#out + 1] = string.char(0xF0 + math.floor(c / 0x40000), 0x80 + math.floor(c / 0x1000) % 0x40, 0x80 + math.floor(c / 0x40) % 0x40, 0x80 + c % 0x40)
+        end
     end
-    return table.concat(out, ",")
+    return table.concat(out)
 end
 
 -- ILocalize (localize.dll, Localize_001): IAppSystem takes indices 0-8, then AddFile 9, RemoveAll 10, Find 11.
@@ -2635,27 +2648,50 @@ function lang.hot_swap(code)
     return true, rebuilt ~= before and "rebuilt" or "already active"
 end
 
+-- Compares ILocalize with what Panorama's $.Localize returns for the first probe token that exists.
+function lang.check_panorama()
+    local api, bridge = lang.api(), lang.panorama
+    if not api or not bridge then return nil end
+    for _, token in ipairs(lang.probe_tokens) do
+        local loaded = api.find(token)
+        if loaded and loaded ~= "" then
+            local ok, shown = pcall(bridge.localize, token)
+            shown = ok and tostring(shown) or "error: " .. tostring(shown)
+            return shown == loaded, token, loaded, shown
+        end
+    end
+    return nil
+end
+
 function lang.apply(code, persist)
     local entry = lang.by_code[code]
     if not entry then return end
     local ok, swapped, detail = pcall(lang.hot_swap, code)
     if not ok then swapped, detail = false, swapped end
+    local note = ""
     if swapped then
         lang.current, lang.selected = code, code
         pcall(function() cvar.cl_language:set_string(code) end)
         if persist then database.write(lang.db_key, code) end
-        lang.status = detail == "already active" and "Active" or "Applied · reopen pages to refresh"
+        lang.status = detail == "already active" and "" or "Loaded"
+        local same, token, loaded, shown = lang.check_panorama()
+        if same == false then
+            lang.status = "Panorama did not update"
+            note = string.format(" · %s: ILocalize \"%s\", Panorama \"%s\"", token, loaded, shown)
+        elseif same then
+            note = string.format(" · Panorama also returns \"%s\"", shown)
+        end
     else
         lang.selected = lang.current
         lang.status = detail == "not installed" and entry[2] .. " is not installed" or "Switch failed"
     end
-    style.log(string.format("language %s: %s", entry[2], swapped and detail or "failed (" .. tostring(detail) .. ")"))
+    style.log(string.format("language %s: %s%s", entry[2], swapped and detail or "failed (" .. tostring(detail) .. ")", note))
 end
 
 lang.js = [[
     var ROW_ID = "UnoinsLanguageRow", PREFIX = "unoins_lang_";
     var HOSTS = ["JsSettings", "SettingsMenu", "Settings", "MainMenuSettings", "JsSettingsMenu"];
-    var host = null, row = null, drop = null, status = null, built = "", applied = "", pending = "";
+    var host = null, row = null, drop = null, status = null, menu = null, built = "", applied = "", pending = "";
     function valid(p) { return p !== null && p !== undefined && p.IsValid(); }
     function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
     function children(p) {
@@ -2693,14 +2729,14 @@ lang.js = [[
         var options = "", list = items.split("|");
         for (var i = 0; i < list.length; i++) {
             var pair = list[i].split("=");
-            if (pair.length === 2) options += '<Label id="' + PREFIX + esc(pair[0]) + '" text="' + esc(pair[1]) + '" style="margin: 4px 12px; font-size: 18px; color: #ffffff;" />';
+            if (pair.length === 2) options += '<Label id="' + PREFIX + esc(pair[0]) + '" text="' + esc(pair[1]) + '" style="width: 100%; padding: 6px 12px; font-size: 16px; color: #e0e0e0;" />';
         }
         return '<root>' + (styled ? '<styles><include src="file://{resources}/styles/csgostyles.css" /></styles>' : '') +
-            '<Panel style="horizontal-align: right; vertical-align: top; height: 52px; margin-top: 96px; margin-right: 48px; margin-bottom: -52px; padding: 8px 14px; flow-children: right; background-color: #000000d0; border-radius: 3px; z-index: 100;">' +
-            '<Label text="Language · 语言" style="vertical-align: center; margin-right: 12px; font-size: 18px; color: #ffffffd0;" />' +
-            '<DropDown id="UnoinsLanguageDrop"' + (styled ? ' class="PopupButton" menuclass="DropDownMenu" style="width: 280px; vertical-align: center;"'
-                : ' style="width: 280px; vertical-align: center; padding: 4px 8px; background-color: #262626f0;"') + '>' + options + '</DropDown>' +
-            '<Label id="UnoinsLanguageStatus" text="" style="vertical-align: center; margin-left: 12px; font-size: 15px; color: #d97757;" />' +
+            '<Panel style="horizontal-align: right; vertical-align: top; height: 40px; margin-top: 96px; margin-right: 48px; margin-bottom: -40px; flow-children: right; z-index: 100;">' +
+            '<Label id="UnoinsLanguageStatus" text="" style="vertical-align: center; margin-right: 12px; font-size: 13px; color: #ffffff66;" />' +
+            '<Label text="Language" style="vertical-align: center; margin-right: 10px; font-size: 15px; color: #ffffff80;" />' +
+            '<DropDown id="UnoinsLanguageDrop"' + (styled ? ' class="PopupButton" menuclass="DropDownMenu" style="width: 220px; vertical-align: center;"'
+                : ' style="width: 220px; height: 32px; vertical-align: center; padding: 4px 10px; background-color: #ffffff12; border-radius: 2px;"') + '>' + options + '</DropDown>' +
             '</Panel></root>';
     }
     function build(parent, items) {
@@ -2719,8 +2755,20 @@ lang.js = [[
         if (valid(drop)) {
             try { drop.SetPanelEvent("oninputsubmit", function () { var s = drop.GetSelected(); if (valid(s)) pending = s.id; }); } catch (e) {}
         }
-        built = items; applied = ""; pending = "";
+        built = items; applied = ""; pending = ""; menu = null;
+        size_menu();
         return true;
+    }
+    // The popup list is created by the DropDown itself and stretches to the screen width unless sized.
+    function size_menu() {
+        try {
+            var m = drop.AccessDropDownMenu();
+            if (!valid(m) || m === menu) return;
+            m.style.width = "260px";
+            m.style.maxHeight = "560px";
+            m.style.overflow = "squish scroll";
+            menu = m;
+        } catch (e) {}
     }
     return {
         sync: function (items, selected, text, allow_root) {
@@ -2731,9 +2779,11 @@ lang.js = [[
                 if (!build(parent, items)) return "layout_failed";
             }
             if (valid(drop) && applied !== selected) { drop.SetSelected(PREFIX + selected); applied = selected; pending = ""; }
-            if (valid(status) && status.text !== text) status.text = text;
+            if (valid(status) && status.text !== text) { status.text = text; status.visible = text !== ""; }
+            if (valid(drop)) size_menu();
             return "ok|" + (parent.id || "(no id)");
         },
+        localize: function (token) { return $.Localize("#" + token); },
         geometry: function () {
             if (!valid(row) || !(row.actuallayoutwidth > 0)) return "";
             var g = "row at " + Math.round(row.actualxoffset) + "," + Math.round(row.actualyoffset) + " size " + Math.round(row.actuallayoutwidth) + "x" + Math.round(row.actuallayoutheight);
@@ -2792,13 +2842,13 @@ function lang.tick()
     if not ui.get(gui.master) then return lang.detach() end
     if not lang.ready then lang.init() end
     if lang.disabled then return end
+    local bridge = lang.bridge()
+    if not bridge then return end
     if lang.auto then
         local code = lang.auto
         lang.auto = nil
         lang.apply(code, false)
     end
-    local bridge = lang.bridge()
-    if not bridge then return end
     local ok, picked = pcall(bridge.poll)
     if ok and type(picked) == "string" and picked ~= "" and picked ~= lang.selected and lang.by_code[picked] then lang.apply(picked, true) end
     local ok_sync, result = ok, picked
