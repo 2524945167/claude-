@@ -2515,7 +2515,7 @@ end
 -- In-game language switcher: a row injected into the Panorama settings page.
 -- Reloads resource/csgo_<lang>.txt through the game's ILocalize interface; the choice is saved
 -- in the gamesense database and re-applied every time the script loads.
-lang.db_key, lang.interval, lang.host_wait = "unoins_language", 0.25, 30
+lang.db_key, lang.interval, lang.host_wait = "unoins_language", 0.25, 5
 lang.by_code, lang.items, lang.status = {}, "", ""
 -- Languages CS:GO ships (Steam API codes).
 lang.catalog = {
@@ -2653,17 +2653,40 @@ function lang.apply(code, persist)
 end
 
 lang.js = [[
-    var ROW_ID = "UnoinsLanguageRow", PREFIX = "unoins_lang_", HOSTS = ["JsSettings"];
+    var ROW_ID = "UnoinsLanguageRow", PREFIX = "unoins_lang_";
+    var HOSTS = ["JsSettings", "SettingsMenu", "Settings", "MainMenuSettings", "JsSettingsMenu"];
     var host = null, row = null, drop = null, status = null, built = "", applied = "", pending = "";
     function valid(p) { return p !== null && p !== undefined && p.IsValid(); }
     function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
-    function find_host() {
+    function children(p) {
+        try { var c = p.Children(); if (c) return c; } catch (e) {}
+        var out = [];
+        try { for (var i = 0; i < p.GetChildCount(); i++) out.push(p.GetChild(i)); } catch (e) {}
+        return out;
+    }
+    // Breadth-first walk over the main menu, at most `limit` panels.
+    function walk(fn, limit) {
+        var queue = [$.GetContextPanel()], seen = 0;
+        while (queue.length > 0 && seen < limit) {
+            var p = queue.shift();
+            if (!valid(p)) continue;
+            seen++;
+            if (fn(p)) return p;
+            var c = children(p);
+            for (var i = 0; i < c.length; i++) queue.push(c[i]);
+        }
+        return null;
+    }
+    function find_host(allow_root) {
         if (valid(host)) return host;
         var root = $.GetContextPanel();
         for (var i = 0; i < HOSTS.length; i++) {
             var p = root.FindChildTraverse(HOSTS[i]);
             if (valid(p)) { host = p; return p; }
         }
+        var named = walk(function (p) { return /^(js)?settings(menu)?$/i.test(p.id || ""); }, 6000);
+        if (named) { host = named; return named; }
+        if (allow_root) { host = root; return root; }
         return null;
     }
     function layout(items, styled) {
@@ -2697,8 +2720,8 @@ lang.js = [[
         return true;
     }
     return {
-        sync: function (items, selected, text) {
-            var parent = find_host();
+        sync: function (items, selected, text, allow_root) {
+            var parent = find_host(allow_root);
             if (!parent) return "no_host";
             if (!valid(row) || built !== items) {
                 if (valid(row)) row.DeleteAsync(0.0);
@@ -2706,7 +2729,17 @@ lang.js = [[
             }
             if (valid(drop) && applied !== selected) { drop.SetSelected(PREFIX + selected); applied = selected; pending = ""; }
             if (valid(status) && status.text !== text) status.text = text;
-            return "ok";
+            return "ok|" + (parent.id || "(no id)");
+        },
+        diagnose: function () {
+            var root = $.GetContextPanel(), top = [], like = [];
+            var c = children(root);
+            for (var i = 0; i < c.length && i < 25; i++) top.push(c[i].id || "?");
+            walk(function (p) {
+                if (/setting/i.test(p.id || "") && like.length < 25) like.push(p.id + (p.visible ? "" : "(hidden)"));
+                return false;
+            }, 6000);
+            return "root=" + (root.id || "?") + "; top=[" + top.join(", ") + "]; settings-like=[" + like.join(", ") + "]";
         },
         poll: function () {
             var picked = pending;
@@ -2758,21 +2791,33 @@ function lang.tick()
     if not bridge then return end
     local ok, picked = pcall(bridge.poll)
     if ok and type(picked) == "string" and picked ~= "" and picked ~= lang.selected and lang.by_code[picked] then lang.apply(picked, true) end
-    local ok_sync, result = pcall(bridge.sync, lang.items, lang.selected, lang.status)
-    if not ok or not ok_sync then
+    local ok_sync, result = ok, picked
+    if ok then ok_sync, result = pcall(bridge.sync, lang.items, lang.selected, lang.status, lang.use_root == true) end
+    if not ok_sync then
         lang.panorama = nil
+        if lang.js_error ~= tostring(result) then
+            lang.js_error = tostring(result)
+            client.error_log("[Ünoins_qucy] Language switcher: Panorama call failed: " .. lang.js_error)
+        end
         return
     end
-    if result == "ok" then
+    local outcome, where = tostring(result):match("^([^|]*)|?(.*)$")
+    if outcome == "ok" then
         lang.missing_since = nil
-    elseif not lang.host_warned then
-        lang.missing_since = lang.missing_since or now
-        if result == "layout_failed" or now - lang.missing_since > lang.host_wait then
-            lang.host_warned = true
-            client.error_log("[Ünoins_qucy] Language switcher: " .. (result == "layout_failed"
-                and "could not build the settings row" or "Panorama panel 'JsSettings' not found"))
+        if lang.attached ~= where then
+            lang.attached = where
+            style.log("language switcher attached to Panorama panel '" .. where .. "'"
+                .. (lang.use_root and " (settings panel not found: shown on the main menu instead)" or ""))
         end
+        return
     end
+    lang.missing_since = lang.missing_since or now
+    if lang.diagnosed or outcome ~= "layout_failed" and now - lang.missing_since < lang.host_wait then return end
+    lang.diagnosed = true
+    local ok_info, info = pcall(bridge.diagnose)
+    client.error_log("[Ünoins_qucy] Language switcher: " .. (outcome == "layout_failed" and "could not build the row" or "settings panel not found")
+        .. "; " .. (ok_info and tostring(info) or "diagnose failed: " .. tostring(info)))
+    if outcome == "no_host" then lang.use_root = true end
 end
 
 
