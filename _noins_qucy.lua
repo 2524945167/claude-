@@ -4,7 +4,7 @@ local conditions = {"Global", "Standing", "Moving", "Slowwalk", "Air", "Air+", "
 local util, ref, aa, native, style, gui, menu, builder, config = {}, {aa = {}, other = {}}, {}, {}, {}, {}, {}, {}, {}
 local state, move, seq, def, pro, fl, slow_pro, pulse, antiaim, fs = {}, {}, {}, {}, {state = {}}, {}, {}, {}, {}, {}
 local hitlog, rh, dormant, qs, hc, stop, override, comm, clan, perf, anim, drop, fd = {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
-local tp, scope, hud, ind, octo, core = {}, {}, {}, {}, {}, {}
+local tp, scope, hud, ind, octo, core, lang = {}, {}, {}, {}, {}, {}, {}
 
 
 do
@@ -363,6 +363,7 @@ ui.set(gui.pet, true)
 ui.set(gui.banner, true)
 menu.header("Home", CON, "Changelog")
 for _, entry in ipairs({
+    {"2026-11-04", {"In-game language switcher in the CS:GO settings page"}},
     {"2026-10-13", {
         "Fix: slider unit text not shown", "Auto resolver off: marked SSG 08 only", "Scope: fine tune folded",
         "Resolver: miss filter, learning, onshot, animstate", "Leaner freestanding reads, Binds styling",
@@ -2479,6 +2480,479 @@ function comm.tick()
 end
 
 
+-- In-game language switcher: a row injected into the Panorama settings page.
+-- Hot switch reloads csgo_<lang>.txt through ILocalize; the choice is saved to the database
+-- (re-applied on every load) and to the Steam appmanifest (used on the next launch).
+lang.db_key, lang.interval, lang.host_wait = "unoins_language", 0.25, 30
+lang.by_code, lang.available, lang.files, lang.items, lang.status = {}, {}, {}, "", ""
+lang.catalog = {
+    {"english", "English"}, {"schinese", "简体中文"}, {"tchinese", "繁體中文"}, {"japanese", "日本語"},
+    {"koreana", "한국어"}, {"thai", "ไทย"}, {"bulgarian", "Български"}, {"czech", "Čeština"},
+    {"danish", "Dansk"}, {"german", "Deutsch"}, {"spanish", "Español - España"}, {"latam", "Español - Latinoamérica"},
+    {"greek", "Ελληνικά"}, {"french", "Français"}, {"italian", "Italiano"}, {"indonesian", "Bahasa Indonesia"},
+    {"hungarian", "Magyar"}, {"dutch", "Nederlands"}, {"norwegian", "Norsk"}, {"polish", "Polski"},
+    {"portuguese", "Português"}, {"brazilian", "Português - Brasil"}, {"romanian", "Română"}, {"russian", "Русский"},
+    {"finnish", "Suomi"}, {"swedish", "Svenska"}, {"turkish", "Türkçe"}, {"vietnamese", "Tiếng Việt"},
+    {"ukrainian", "Українська"}, {"arabic", "العربية"}
+}
+do
+    -- Each declaration on its own so one already declared by another script does not block the rest.
+    -- Pointer arguments are void* so foreign declarations (e.g. WIN32_FIND_DATAA*) stay compatible.
+    pcall(ffi.cdef, [[typedef struct { uint32_t attributes; uint32_t times[6]; uint32_t size_high, size_low, reserved0, reserved1;
+        char name[260]; char alt_name[14]; } unoins_find_data;]])
+    for _, decl in ipairs({
+        "uint32_t GetModuleFileNameA(void* module, char* name, uint32_t size);",
+        "const char* GetCommandLineA(void);",
+        "uint32_t GetFileAttributesA(const char* name);",
+        "void* FindFirstFileA(const char* pattern, void* data);",
+        "int FindNextFileA(void* find, void* data);",
+        "int FindClose(void* find);",
+        "void* CreateFileA(const char* name, uint32_t access, uint32_t share, void* security, uint32_t disposition, uint32_t flags, void* tmpl);",
+        "int ReadFile(void* file, void* buffer, uint32_t size, uint32_t* read, void* overlapped);",
+        "int WriteFile(void* file, const char* buffer, uint32_t size, uint32_t* written, void* overlapped);",
+        "uint32_t GetFileSize(void* file, uint32_t* high);",
+        "int CloseHandle(void* handle);",
+        "int CopyFileA(const char* from, const char* to, int fail_if_exists);",
+        "int MoveFileExA(const char* from, const char* to, uint32_t flags);",
+        "int DeleteFileA(const char* name);",
+        "int WideCharToMultiByte(uint32_t page, uint32_t flags, const uint16_t* wide, int count, char* out, int size, const char* def, int* used);"
+    }) do
+        pcall(ffi.cdef, decl)
+    end
+end
+
+function lang.handle_ok(h)
+    return h ~= nil and tonumber(ffi.cast("intptr_t", h)) ~= -1
+end
+
+function lang.exists(path)
+    local attributes = tonumber(ffi.C.GetFileAttributesA(path))
+    return attributes ~= nil and attributes ~= 0xFFFFFFFF and bit.band(attributes, 0x10) == 0
+end
+
+function lang.list(pattern)
+    local names, data = {}, ffi.new("unoins_find_data")
+    local h = ffi.C.FindFirstFileA(pattern, ffi.cast("void*", data))
+    if not lang.handle_ok(h) then return names end
+    repeat
+        if bit.band(tonumber(data.attributes), 0x10) == 0 then names[#names + 1] = ffi.string(data.name) end
+    until #names >= 256 or not util.pressed(ffi.C.FindNextFileA(h, ffi.cast("void*", data)))
+    ffi.C.FindClose(h)
+    return names
+end
+
+function lang.read_file(path, limit)
+    local h = ffi.C.CreateFileA(path, 0x80000000, 3, nil, 3, 0x80, nil)
+    if not lang.handle_ok(h) then return nil, "cannot open " .. path end
+    local ok, data = pcall(function()
+        local size = tonumber(ffi.C.GetFileSize(h, nil))
+        if not size or size == 0xFFFFFFFF or size > (limit or 16777216) then error("invalid size: " .. path) end
+        if size == 0 then return "" end
+        local buffer, got = ffi.new("uint8_t[?]", size), ffi.new("uint32_t[1]")
+        if not util.pressed(ffi.C.ReadFile(h, buffer, size, got, nil)) or got[0] ~= size then error("read failed: " .. path) end
+        return ffi.string(buffer, size)
+    end)
+    ffi.C.CloseHandle(h)
+    if not ok then return nil, data end
+    return data
+end
+
+function lang.write_file(path, data)
+    local h = ffi.C.CreateFileA(path, 0x40000000, 0, nil, 2, 0x80, nil)
+    if not lang.handle_ok(h) then return false end
+    local written = ffi.new("uint32_t[1]")
+    local ok = util.pressed(ffi.C.WriteFile(h, data, #data, written, nil)) and written[0] == #data
+    ffi.C.CloseHandle(h)
+    return ok
+end
+
+function lang.utf8(wide, count)
+    local size = ffi.C.WideCharToMultiByte(65001, 0, wide, count, nil, 0, nil, nil)
+    if size <= 0 then return nil end
+    local out = ffi.new("char[?]", size)
+    size = ffi.C.WideCharToMultiByte(65001, 0, wide, count, out, size, nil, nil)
+    if size <= 0 then return nil end
+    return ffi.string(out, count < 0 and size - 1 or size)
+end
+
+-- Localization files are UTF-16LE with a BOM; fall back to UTF-8 otherwise.
+function lang.decode(raw)
+    local b1, b2 = raw:byte(1, 2)
+    if b1 == 0xFF and b2 == 0xFE then
+        local count = math.floor((#raw - 2) / 2)
+        if count <= 0 then return "" end
+        return lang.utf8(ffi.cast("const uint16_t*", ffi.cast("const char*", raw) + 2), count)
+    end
+    if raw:sub(1, 3) == "\239\187\191" then return raw:sub(4) end
+    return raw
+end
+
+function lang.paths()
+    local buffer = ffi.new("char[520]")
+    local n = tonumber(ffi.C.GetModuleFileNameA(nil, buffer, 520)) or 0
+    if n <= 0 or n >= 520 then return nil end
+    local root = ffi.string(buffer, n):match("^(.*)[\\/][^\\/]+$")
+    if not root then return nil end
+    local p = {root = root, resource = root .. "\\csgo\\resource\\", platform = root .. "\\platform\\resource\\"}
+    local common, installdir = root:match("^(.*)[\\/]([^\\/]+)$")
+    local steamapps, folder
+    if common then steamapps, folder = common:match("^(.*)[\\/]([^\\/]+)$") end
+    if folder and folder:lower() == "common" then p.steamapps, p.installdir = steamapps, installdir end
+    return p
+end
+
+-- Every "<prefix>_english.txt" in the game and platform resource folders is a localization file to swap.
+function lang.scan_files(p)
+    local files = {}
+    for _, source in ipairs({{p.resource, "GAME"}, {p.platform, "PLATFORM"}}) do
+        for _, name in ipairs(lang.list(source[1] .. "*_english.txt")) do
+            local prefix = name:lower():match("^([%w_]+)_english%.txt$")
+            if prefix and not prefix:find("^closecaption") and not prefix:find("^subtitles") then
+                files[#files + 1] = {prefix = prefix, dir = source[1], path_id = source[2]}
+            end
+        end
+    end
+    table.sort(files, function(a, b)
+        if (a.prefix == "csgo") ~= (b.prefix == "csgo") then return a.prefix == "csgo" end
+        return a.dir .. a.prefix < b.dir .. b.prefix
+    end)
+    return files
+end
+
+function lang.manifest_path()
+    if lang.manifest ~= nil then return lang.manifest or nil end
+    lang.manifest = false
+    local p = lang.dirs
+    if not p or not p.steamapps then return nil end
+    local want = p.installdir:lower()
+    for _, name in ipairs(lang.list(p.steamapps .. "\\appmanifest_*.acf")) do
+        local path = p.steamapps .. "\\" .. name
+        local text = lang.read_file(path, 1048576)
+        local dir = text and text:match('"installdir"%s*"([^"]*)"')
+        if dir and dir:lower() == want then
+            lang.manifest = path
+            break
+        end
+    end
+    return lang.manifest or nil
+end
+
+-- Language the game was started with: -language launch option, then the Steam manifest, then cl_language.
+function lang.detect()
+    local line = ffi.C.GetCommandLineA()
+    local arg = line ~= nil and ffi.string(line):lower():match("%-language%s+\"?([%a]+)")
+    if arg and lang.by_code[arg] then return arg end
+    local manifest = lang.manifest_path()
+    local text = manifest and lang.read_file(manifest, 1048576)
+    local code = text and text:match('"UserConfig"%s*{[^}]-"language"%s*"([^"]*)"')
+    if code and lang.by_code[code:lower()] then return code:lower() end
+    local ok, value = pcall(function() return cvar.cl_language:get_string() end)
+    if ok and type(value) == "string" and lang.by_code[value:lower()] then return value:lower() end
+    return "english"
+end
+
+function lang.fail(reason)
+    lang.disabled = true
+    client.error_log("[Ünoins_qucy] Language switcher disabled: " .. tostring(reason))
+end
+
+function lang.init()
+    lang.ready = true
+    local ok, err = pcall(function()
+        local p = lang.paths()
+        if not p then error("game directory not found") end
+        lang.dirs, lang.files = p, lang.scan_files(p)
+        local items = {}
+        for _, entry in ipairs(lang.catalog) do
+            if lang.exists(p.resource .. "csgo_" .. entry[1] .. ".txt") then
+                lang.available[#lang.available + 1] = entry
+                lang.by_code[entry[1]] = entry
+                items[#items + 1] = entry[1] .. "=" .. entry[2]
+            end
+        end
+        if #lang.available == 0 then error("no csgo_<language>.txt in " .. p.resource) end
+        lang.items = table.concat(items, "|")
+    end)
+    if not ok then return lang.fail(err) end
+    lang.current = lang.detect()
+    lang.selected, lang.status = lang.current, "Active"
+    local saved = database.read(lang.db_key)
+    if type(saved) == "string" and lang.by_code[saved] then
+        lang.selected = saved
+        if saved ~= lang.current then lang.auto = saved end
+    end
+end
+
+-- ILocalize (localize.dll, Localize_001): IAppSystem takes indices 0-8, then AddFile 9, RemoveAll 10, Find 11.
+function lang.api()
+    if lang.localize ~= nil then return lang.localize or nil end
+    local ok, api = pcall(function()
+        local instance = client.create_interface("localize.dll", "Localize_001")
+        if not instance then error("Localize_001 not found") end
+        local this = ffi.cast("void*", instance)
+        local vtable = ffi.cast("void***", this)[0]
+        local add_file = ffi.cast("bool(__thiscall*)(void*, const char*, const char*, bool)", vtable[9])
+        local remove_all = ffi.cast("void(__thiscall*)(void*)", vtable[10])
+        local find = ffi.cast("const uint16_t*(__thiscall*)(void*, const char*)", vtable[11])
+        return {
+            add_file = function(path, path_id) return add_file(this, path, path_id, false) end,
+            remove_all = function() remove_all(this) end,
+            find = function(token)
+                local wide = find(this, token)
+                if wide == nil then return nil end
+                return lang.utf8(wide, -1)
+            end
+        }
+    end)
+    if not ok then client.error_log("[Ünoins_qucy] Language switcher: " .. tostring(api)) end
+    lang.localize = ok and api or false
+    return lang.localize or nil
+end
+
+-- Tokens from the target file whose loaded value differs today; used to verify the swap really happened.
+function lang.probes(api, code)
+    local raw = lang.read_file(lang.dirs.resource .. "csgo_" .. code .. ".txt")
+    local text = raw and lang.decode(raw)
+    if not text then return nil, 0 end
+    local probes, same, lines = {}, 0, 0
+    for line in text:gmatch("[^\n]+") do
+        lines = lines + 1
+        local key, value = line:match('^%s*"([%w_]+)"%s+"([^"\\%%]*)"')
+        if key and key:lower() ~= "language" and #value >= 2 and #value <= 80 then
+            local current = api.find(key)
+            if current == value then
+                same = same + 1
+            elseif current then
+                probes[#probes + 1] = {key, value}
+            end
+        end
+        if #probes >= 8 or lines >= 6000 then break end
+    end
+    return probes, same
+end
+
+function lang.verified(api, probes)
+    local hits = 0
+    for _, probe in ipairs(probes) do
+        if api.find(probe[1]) == probe[2] then hits = hits + 1 end
+    end
+    return hits * 2 >= #probes
+end
+
+function lang.add_all(api, code)
+    local added = 0
+    for _, f in ipairs(lang.files) do
+        local name = f.prefix .. "_" .. code .. ".txt"
+        if lang.exists(f.dir .. name) and util.pressed(api.add_file("resource/" .. name, f.path_id)) then added = added + 1 end
+    end
+    return added
+end
+
+-- Overlay the target files first; if existing strings are not replaced, rebuild the table
+-- with the target language first and English after it as the fallback for missing tokens.
+function lang.hot_swap(code)
+    local api = lang.api()
+    if not api then return false, "ILocalize unavailable" end
+    local probes, same = lang.probes(api, code)
+    if probes and #probes == 0 and same > 0 then return true, "already active" end
+    if lang.add_all(api, code) == 0 then return false, "AddFile failed" end
+    if not probes or #probes == 0 then return true, "loaded, unverified" end
+    if lang.verified(api, probes) then return true, "overlay" end
+    api.remove_all()
+    local added = lang.add_all(api, code)
+    if code ~= "english" then added = added + lang.add_all(api, "english") end
+    if added == 0 then lang.add_all(api, lang.current or "english") end
+    if lang.verified(api, probes) then return true, "rebuilt" end
+    return false, "strings did not change"
+end
+
+-- Sets "language" in UserConfig (and MountedConfig when present, so Steam does not queue a language download).
+function lang.acf_language(text, code)
+    if not text:find('"AppState"', 1, true) then return nil end
+    local function set_block(src, name, insert)
+        local _, open = src:find('"' .. name .. '"%s*{')
+        if not open then return src, false end
+        local close = src:find("}", open + 1, true)
+        if not close then return src, false end
+        local block = src:sub(open + 1, close - 1)
+        local updated, n = block:gsub('("language"%s*")[^"]*(")', "%1" .. code .. "%2", 1)
+        if n == 0 then
+            if not insert then return src, true end
+            updated = block:gsub("%s*$", "") .. '\n\t\t"language"\t\t"' .. code .. '"\n\t'
+        end
+        return src:sub(1, open) .. updated .. src:sub(close), true
+    end
+    local out, found = set_block(text, "UserConfig", true)
+    if not found then
+        local last = out:match(".*()}")
+        if not last then return nil end
+        out = out:sub(1, last - 1) .. '\t"UserConfig"\n\t{\n\t\t"language"\t\t"' .. code .. '"\n\t}\n' .. out:sub(last)
+    end
+    return (set_block(out, "MountedConfig", false))
+end
+
+function lang.write_manifest(code)
+    local path = lang.manifest_path()
+    if not path then return false, "appmanifest not found" end
+    local text, err = lang.read_file(path, 1048576)
+    if not text then return false, err end
+    local updated = lang.acf_language(text, code)
+    if not updated then return false, "unexpected appmanifest format" end
+    if updated == text then return true, "unchanged" end
+    ffi.C.CopyFileA(path, path .. ".unoins_bak", 1)
+    local temp = path .. ".unoins_tmp"
+    if not lang.write_file(temp, updated) then return false, "write failed" end
+    if not util.pressed(ffi.C.MoveFileExA(temp, path, 0x9)) then
+        ffi.C.DeleteFileA(temp)
+        return false, "replace failed"
+    end
+    return true, "written"
+end
+
+function lang.apply(code, persist)
+    local entry = lang.by_code[code]
+    if not entry then return end
+    local ok, swapped, detail = pcall(lang.hot_swap, code)
+    if not ok then swapped, detail = false, swapped end
+    lang.selected = code
+    if swapped then
+        lang.current = code
+        pcall(function() cvar.cl_language:set_string(code) end)
+    end
+    local note = ""
+    if persist then
+        database.write(lang.db_key, code)
+        local mok, written, why = pcall(lang.write_manifest, code)
+        note = mok and written and " · manifest " .. why or " · manifest not saved: " .. tostring(mok and why or written)
+    end
+    lang.status = swapped and (detail == "already active" and "Active" or "Applied · reopen pages to refresh") or "Restart CS:GO to apply"
+    style.log(string.format("language %s: %s%s", entry[2], swapped and detail or "hot switch failed (" .. tostring(detail) .. ")", note))
+end
+
+lang.js = [[
+    var ROW_ID = "UnoinsLanguageRow", PREFIX = "unoins_lang_", HOSTS = ["JsSettings"];
+    var host = null, row = null, drop = null, status = null, built = "", applied = "", pending = "";
+    function valid(p) { return p !== null && p !== undefined && p.IsValid(); }
+    function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
+    function find_host() {
+        if (valid(host)) return host;
+        var root = $.GetContextPanel();
+        for (var i = 0; i < HOSTS.length; i++) {
+            var p = root.FindChildTraverse(HOSTS[i]);
+            if (valid(p)) { host = p; return p; }
+        }
+        return null;
+    }
+    function layout(items, styled) {
+        var options = "", list = items.split("|");
+        for (var i = 0; i < list.length; i++) {
+            var pair = list[i].split("=");
+            if (pair.length === 2) options += '<Label id="' + PREFIX + esc(pair[0]) + '" text="' + esc(pair[1]) + '" style="margin: 4px 12px; font-size: 18px; color: #ffffff;" />';
+        }
+        return '<root>' + (styled ? '<styles><include src="file://{resources}/styles/csgostyles.css" /></styles>' : '') +
+            '<Panel style="horizontal-align: right; vertical-align: top; margin-top: 96px; margin-right: 48px; padding: 8px 14px; flow-children: right; background-color: #000000b0; border-radius: 3px; z-index: 50;">' +
+            '<Label text="Language · 语言" style="vertical-align: center; margin-right: 12px; font-size: 18px; color: #ffffffd0;" />' +
+            '<DropDown id="UnoinsLanguageDrop"' + (styled ? ' class="PopupButton" menuclass="DropDownMenu" style="width: 280px; vertical-align: center;"'
+                : ' style="width: 280px; vertical-align: center; padding: 4px 8px; background-color: #262626f0;"') + '>' + options + '</DropDown>' +
+            '<Label id="UnoinsLanguageStatus" text="" style="vertical-align: center; margin-left: 12px; font-size: 15px; color: #d97757;" />' +
+            '</Panel></root>';
+    }
+    function build(parent, items) {
+        var stale = parent.FindChildTraverse(ROW_ID);
+        if (valid(stale)) { stale.visible = false; stale.DeleteAsync(0.0); }
+        row = $.CreatePanel("Panel", parent, ROW_ID);
+        var loaded = false;
+        try { loaded = row.BLoadLayoutFromString(layout(items, true), false, false); } catch (e) {}
+        if (!loaded) { try { loaded = row.BLoadLayoutFromString(layout(items, false), false, false); } catch (e) {} }
+        if (!loaded) { row.DeleteAsync(0.0); row = null; return false; }
+        drop = row.FindChildTraverse("UnoinsLanguageDrop");
+        status = row.FindChildTraverse("UnoinsLanguageStatus");
+        if (valid(drop)) {
+            try { drop.SetPanelEvent("oninputsubmit", function () { var s = drop.GetSelected(); if (valid(s)) pending = s.id; }); } catch (e) {}
+        }
+        built = items; applied = ""; pending = "";
+        return true;
+    }
+    return {
+        sync: function (items, selected, text) {
+            var parent = find_host();
+            if (!parent) return "no_host";
+            if (!valid(row) || built !== items) {
+                if (valid(row)) row.DeleteAsync(0.0);
+                if (!build(parent, items)) return "layout_failed";
+            }
+            if (valid(drop) && applied !== selected) { drop.SetSelected(PREFIX + selected); applied = selected; pending = ""; }
+            if (valid(status) && status.text !== text) status.text = text;
+            return "ok";
+        },
+        poll: function () {
+            var picked = pending;
+            pending = "";
+            if (!picked && valid(drop)) { var s = drop.GetSelected(); if (valid(s)) picked = s.id; }
+            picked = picked && picked.indexOf(PREFIX) === 0 ? picked.substr(PREFIX.length) : "";
+            if (!picked || picked === applied) return "";
+            applied = picked;
+            return picked;
+        },
+        remove: function () {
+            if (valid(row)) { row.visible = false; row.DeleteAsync(0.0); }
+            host = row = drop = status = null;
+            built = applied = pending = "";
+        }
+    };
+]]
+
+function lang.bridge()
+    if lang.panorama then return lang.panorama end
+    local ok, bridge = pcall(function() return panorama.loadstring(lang.js, "CSGOMainMenu")() end)
+    if ok and bridge then
+        lang.panorama = bridge
+    elseif not lang.bridge_warned then
+        lang.bridge_warned = true
+        client.error_log("[Ünoins_qucy] Language switcher: Panorama bridge failed: " .. tostring(bridge))
+    end
+    return lang.panorama
+end
+
+function lang.detach()
+    if lang.panorama then pcall(lang.panorama.remove) end
+    lang.panorama = nil
+end
+
+function lang.tick()
+    local now = globals.realtime()
+    if lang.time and now >= lang.time and now - lang.time < lang.interval then return end
+    lang.time = now
+    if not ui.get(gui.master) then return lang.detach() end
+    if not lang.ready then lang.init() end
+    if lang.disabled then return end
+    if lang.auto then
+        local code = lang.auto
+        lang.auto = nil
+        lang.apply(code, false)
+    end
+    local bridge = lang.bridge()
+    if not bridge then return end
+    local ok, picked = pcall(bridge.poll)
+    if ok and type(picked) == "string" and picked ~= "" and picked ~= lang.selected and lang.by_code[picked] then lang.apply(picked, true) end
+    local ok_sync, result = pcall(bridge.sync, lang.items, lang.selected, lang.status)
+    if not ok or not ok_sync then
+        lang.panorama = nil
+        return
+    end
+    if result == "ok" then
+        lang.missing_since = nil
+    elseif not lang.host_warned then
+        lang.missing_since = lang.missing_since or now
+        if result == "layout_failed" or now - lang.missing_since > lang.host_wait then
+            lang.host_warned = true
+            client.error_log("[Ünoins_qucy] Language switcher: " .. (result == "layout_failed"
+                and "could not build the settings row" or "Panorama panel 'JsSettings' not found"))
+        end
+    end
+end
+
+
 clan.chars, clan.idx, clan.dir, clan.timer, clan.prev_mode = {}, 1, 1, 0, "Off"
 for mode, tag in pairs({["Half-life.beta"] = "Half-life.lua", ["Ünoins_qucy"] = "Ünoins_qucy", ["gamesense"] = "gamesense", ["Ideal Yaw"] = "Ideal Yaw"}) do
     local chars = {}
@@ -4264,6 +4738,7 @@ end)
 client.set_event_callback("paint_ui", function()
     rh.retry()
     comm.tick()
+    lang.tick()
     core.paint_ui()
     menu.paint()
     ind.qucy_paint()
@@ -4323,6 +4798,7 @@ client.set_event_callback("post_config_load", function()
 end)
 client.set_event_callback("shutdown", function()
     comm.restore()
+    lang.detach()
     core.shutdown()
 end)
 client.register_esp_flag("DA", 255, 255, 255, dormant.flag)
