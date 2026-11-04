@@ -1740,7 +1740,7 @@ end
 
 function rh.readable(address, size)
     local mbi = rh.mbi
-    if address < 0x10000 or ffi.C.VirtualQuery(ffi.cast("const void*", address), mbi, ffi.sizeof(mbi)) == 0 then return false end
+    if address < 0x10000 or lang.k32.VirtualQuery(ffi.cast("const void*", address), ffi.cast("void*", mbi), ffi.sizeof(mbi)) == 0 then return false end
     local protect = tonumber(mbi.protect)
     return tonumber(mbi.state) == 0x1000 and bit.band(protect, 0x101) == 0 and bit.band(protect, 0xEE) ~= 0
         and address + size <= tonumber(ffi.cast("uintptr_t", mbi.base)) + tonumber(mbi.region_size)
@@ -2544,22 +2544,23 @@ lang.k32_types = {
     CopyFileA = "int(__stdcall*)(const char*, const char*, int)",
     MoveFileExA = "int(__stdcall*)(const char*, const char*, uint32_t)",
     DeleteFileA = "int(__stdcall*)(const char*)",
-    WideCharToMultiByte = "int(__stdcall*)(uint32_t, uint32_t, const uint16_t*, int, char*, int, const char*, int*)"
+    WideCharToMultiByte = "int(__stdcall*)(uint32_t, uint32_t, const uint16_t*, int, char*, int, const char*, int*)",
+    VirtualQuery = "size_t(__stdcall*)(const void*, void*, size_t)"
 }
-lang.cdef_errors, lang.modules, lang.exports = {}, {}, {}
+lang.cdef_errors, lang.modules = {}, {}
 for name, ctype in pairs(lang.k32_types) do
     local ok, err = pcall(ffi.cdef, (ctype:gsub("%(__stdcall%*%)", " __stdcall " .. name, 1)) .. ";")
     if not ok and not tostring(err):find("redefine", 1, true) then lang.cdef_errors[#lang.cdef_errors + 1] = name .. ": " .. tostring(err) end
 end
 
--- Base address of a loaded module: find its "MZ" header, then walk back on 64 KiB boundaries
--- (module bases are 64 KiB aligned) until a valid PE32 header is found. Every address read lies
--- between the module base and the match, i.e. inside the mapped image.
-function lang.module(name)
-    local cached = lang.modules[name]
+-- Mapped PE32 image of a loaded module. client.find_signature only searches code, so take any match
+-- inside the module and walk back on 64 KiB boundaries (module bases are 64 KiB aligned) to the
+-- "MZ"/"PE" headers. Every address read lies between the base and the match, i.e. inside the image.
+function lang.image(module)
+    local cached = lang.modules[module]
     if cached ~= nil then return cached or nil end
-    lang.modules[name] = false
-    local hit = client.find_signature(name, "\x4D\x5A\x90\x00\x03")
+    lang.modules[module] = false
+    local hit = client.find_signature(module, "\x55\x8B\xEC")
     if not hit then return nil end
     local address = tonumber(ffi.cast("uintptr_t", hit))
     address = address - address % 0x10000
@@ -2570,8 +2571,9 @@ function lang.module(name)
             local lfanew = ffi.cast("const int32_t*", p + 0x3C)[0]
             if lfanew > 0 and lfanew < 0x1000 and ffi.cast("const uint32_t*", p + lfanew)[0] == 0x4550
                 and ffi.cast("const uint16_t*", p + lfanew + 24)[0] == 0x10B then
-                lang.modules[name] = address
-                return address
+                local image = {u8 = p, lfanew = lfanew, size = ffi.cast("const uint32_t*", p + lfanew + 0x50)[0]}
+                lang.modules[module] = image
+                return image
             end
         end
         address = address - 0x10000
@@ -2579,47 +2581,69 @@ function lang.module(name)
     return nil
 end
 
--- Address of an exported function, following forwarders such as "KERNELBASE.CreateFileA".
-function lang.export(module, name, depth)
-    module = module:lower()
-    local table_ = lang.exports[module]
-    if table_ == nil then
-        table_ = false
-        local base = lang.module(module)
-        if base then
-            local u8 = ffi.cast("const uint8_t*", base)
-            local function u32(rva) return ffi.cast("const uint32_t*", u8 + rva)[0] end
-            local lfanew = ffi.cast("const int32_t*", u8 + 0x3C)[0]
-            local dir, size = u32(lfanew + 0x78), u32(lfanew + 0x7C)
-            if dir ~= 0 then
-                table_ = {u8 = u8, dir = dir, size = size, names = {}}
-                local count, functions, names, ordinals = u32(dir + 24), u32(dir + 28), u32(dir + 32), u32(dir + 36)
-                for i = 0, math.min(count, 65535) - 1 do
-                    local ordinal = ffi.cast("const uint16_t*", u8 + ordinals + i * 2)[0]
-                    table_.names[ffi.string(u8 + u32(names + i * 4))] = u32(functions + ordinal * 4)
-                end
+-- Addresses the loader wrote into a module's import table for the wanted kernel32 functions.
+function lang.imports(module, wanted)
+    local found, image = {}, lang.image(module)
+    if not image then return found end
+    local u8, size = image.u8, image.size
+    local function u32(rva)
+        if rva < 0 or rva + 4 > size then error("import table outside the image") end
+        return ffi.cast("const uint32_t*", u8 + rva)[0]
+    end
+    local function name_at(rva) return rva > 0 and rva < size and ffi.string(u8 + rva) or nil end
+    local dir = u32(image.lfanew + 0x80)
+    if dir == 0 then return found end
+    for descriptor = dir, dir + 20 * 1023, 20 do
+        local dll_rva = u32(descriptor + 12)
+        if dll_rva == 0 then break end
+        local dll = (name_at(dll_rva) or ""):lower()
+        local names, slots = u32(descriptor), u32(descriptor + 16)
+        if names ~= 0 and (dll == "kernel32.dll" or dll:find("^api%-ms%-win%-core%-libraryloader")) then
+            for i = 0, 4095 do
+                local entry = u32(names + i * 4)
+                if entry == 0 then break end
+                local fn = entry < 0x80000000 and name_at(entry + 2)
+                if fn and wanted[fn] then found[fn] = u32(slots + i * 4) end
             end
         end
-        lang.exports[module] = table_
     end
-    local rva = table_ and table_.names[name]
-    if not rva then return nil end
-    if rva < table_.dir or rva >= table_.dir + table_.size then return table_.u8 + rva end
-    local dll, fn = ffi.string(table_.u8 + rva):match("^([^%.]+)%.(.+)$")
-    if not dll or (depth or 0) >= 3 or fn:sub(1, 1) == "#" then return nil end
-    if dll:lower():find("^api%-ms%-") or dll:lower():find("^ext%-ms%-") then dll = "kernelbase" end
-    return lang.export(dll .. ".dll", fn, (depth or 0) + 1)
+    return found
 end
 
--- lang.k32.Name: the ffi.C declaration when it works, otherwise the address from kernel32's export table.
+-- GetModuleHandleA / GetProcAddress as imported by a game module; every other kernel32 function is looked up through them.
+function lang.loader()
+    if lang.loader_state ~= nil then return lang.loader_state or nil end
+    lang.loader_state, lang.loader_note = false, "no GetProcAddress/GetModuleHandleA import found"
+    for _, module in ipairs({"engine.dll", "client.dll", "tier0.dll", "vstdlib.dll", "materialsystem.dll"}) do
+        local ok, found = pcall(lang.imports, module, {GetProcAddress = true, GetModuleHandleA = true})
+        if not ok then
+            lang.loader_note = module .. ": " .. tostring(found)
+        elseif found.GetProcAddress and found.GetModuleHandleA then
+            local get_module = ffi.cast("void*(__stdcall*)(const char*)", found.GetModuleHandleA)
+            local get_proc = ffi.cast("void*(__stdcall*)(void*, const char*)", found.GetProcAddress)
+            local kernel32 = get_module("kernel32.dll")
+            if kernel32 ~= nil then
+                lang.loader_state = {proc = get_proc, kernel32 = kernel32, from = module}
+                return lang.loader_state
+            end
+            lang.loader_note = module .. ": GetModuleHandleA(kernel32.dll) returned NULL"
+        end
+    end
+    return nil
+end
+
+-- lang.k32.Name: the ffi.C declaration when it works, otherwise GetProcAddress(kernel32, Name).
 lang.k32 = setmetatable({}, {__index = function(t, name)
     local ctype = lang.k32_types[name]
     if not ctype then error("unknown kernel32 function " .. tostring(name)) end
     local ok, fn = pcall(function() return ffi.C[name] end)
     if not ok or fn == nil then
-        local address = lang.export("kernel32.dll", name)
+        local loader = lang.loader()
+        local address = loader and loader.proc(loader.kernel32, name)
         if address == nil then
-            error("kernel32." .. name .. " unavailable (ffi.C: " .. tostring(fn) .. (lang.cdef_errors[1] and "; cdef: " .. lang.cdef_errors[1] or "") .. ")")
+            error("kernel32." .. name .. " unavailable (ffi.C: " .. tostring(fn) .. "; loader: "
+                .. (loader and "GetProcAddress returned NULL via " .. loader.from or tostring(lang.loader_note))
+                .. (lang.cdef_errors[1] and "; cdef: " .. lang.cdef_errors[1] or "") .. ")")
         end
         fn = ffi.cast(ctype, address)
     end
