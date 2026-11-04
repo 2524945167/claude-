@@ -2527,82 +2527,157 @@ lang.catalog = {
     {"finnish", "Suomi"}, {"swedish", "Svenska"}, {"turkish", "Türkçe"}, {"vietnamese", "Tiếng Việt"},
     {"ukrainian", "Українська"}, {"arabic", "العربية"}
 }
-do
-    -- Each declaration on its own so one already declared by another script does not block the rest.
-    -- Pointer arguments are void* so foreign declarations (e.g. WIN32_FIND_DATAA*) stay compatible.
-    pcall(ffi.cdef, [[typedef struct { uint32_t attributes; uint32_t times[6]; uint32_t size_high, size_low, reserved0, reserved1;
-        char name[260]; char alt_name[14]; } unoins_find_data;]])
-    for _, decl in ipairs({
-        "uint32_t GetModuleFileNameA(void* module, char* name, uint32_t size);",
-        "const char* GetCommandLineA(void);",
-        "uint32_t GetFileAttributesA(const char* name);",
-        "void* FindFirstFileA(const char* pattern, void* data);",
-        "int FindNextFileA(void* find, void* data);",
-        "int FindClose(void* find);",
-        "void* CreateFileA(const char* name, uint32_t access, uint32_t share, void* security, uint32_t disposition, uint32_t flags, void* tmpl);",
-        "int ReadFile(void* file, void* buffer, uint32_t size, uint32_t* read, void* overlapped);",
-        "int WriteFile(void* file, const char* buffer, uint32_t size, uint32_t* written, void* overlapped);",
-        "uint32_t GetFileSize(void* file, uint32_t* high);",
-        "int CloseHandle(void* handle);",
-        "int CopyFileA(const char* from, const char* to, int fail_if_exists);",
-        "int MoveFileExA(const char* from, const char* to, uint32_t flags);",
-        "int DeleteFileA(const char* name);",
-        "int WideCharToMultiByte(uint32_t page, uint32_t flags, const uint16_t* wide, int count, char* out, int size, const char* def, int* used);"
-    }) do
-        pcall(ffi.cdef, decl)
-    end
+-- kernel32 functions used below, as function pointer types. Pointer arguments are void* so a
+-- declaration made by another script (e.g. with WIN32_FIND_DATAA*) stays call-compatible.
+lang.k32_types = {
+    GetModuleFileNameA = "uint32_t(__stdcall*)(void*, char*, uint32_t)",
+    GetCommandLineA = "const char*(__stdcall*)(void)",
+    GetFileAttributesA = "uint32_t(__stdcall*)(const char*)",
+    FindFirstFileA = "void*(__stdcall*)(const char*, void*)",
+    FindNextFileA = "int(__stdcall*)(void*, void*)",
+    FindClose = "int(__stdcall*)(void*)",
+    CreateFileA = "void*(__stdcall*)(const char*, uint32_t, uint32_t, void*, uint32_t, uint32_t, void*)",
+    ReadFile = "int(__stdcall*)(void*, void*, uint32_t, uint32_t*, void*)",
+    WriteFile = "int(__stdcall*)(void*, const char*, uint32_t, uint32_t*, void*)",
+    GetFileSize = "uint32_t(__stdcall*)(void*, uint32_t*)",
+    CloseHandle = "int(__stdcall*)(void*)",
+    CopyFileA = "int(__stdcall*)(const char*, const char*, int)",
+    MoveFileExA = "int(__stdcall*)(const char*, const char*, uint32_t)",
+    DeleteFileA = "int(__stdcall*)(const char*)",
+    WideCharToMultiByte = "int(__stdcall*)(uint32_t, uint32_t, const uint16_t*, int, char*, int, const char*, int*)"
+}
+lang.cdef_errors, lang.modules, lang.exports = {}, {}, {}
+for name, ctype in pairs(lang.k32_types) do
+    local ok, err = pcall(ffi.cdef, (ctype:gsub("%(__stdcall%*%)", " __stdcall " .. name, 1)) .. ";")
+    if not ok and not tostring(err):find("redefine", 1, true) then lang.cdef_errors[#lang.cdef_errors + 1] = name .. ": " .. tostring(err) end
 end
+
+-- Base address of a loaded module: find its "MZ" header, then walk back on 64 KiB boundaries
+-- (module bases are 64 KiB aligned) until a valid PE32 header is found. Every address read lies
+-- between the module base and the match, i.e. inside the mapped image.
+function lang.module(name)
+    local cached = lang.modules[name]
+    if cached ~= nil then return cached or nil end
+    lang.modules[name] = false
+    local hit = client.find_signature(name, "\x4D\x5A\x90\x00\x03")
+    if not hit then return nil end
+    local address = tonumber(ffi.cast("uintptr_t", hit))
+    address = address - address % 0x10000
+    for _ = 1, 1024 do
+        if address <= 0 then break end
+        local p = ffi.cast("const uint8_t*", address)
+        if p[0] == 0x4D and p[1] == 0x5A then
+            local lfanew = ffi.cast("const int32_t*", p + 0x3C)[0]
+            if lfanew > 0 and lfanew < 0x1000 and ffi.cast("const uint32_t*", p + lfanew)[0] == 0x4550
+                and ffi.cast("const uint16_t*", p + lfanew + 24)[0] == 0x10B then
+                lang.modules[name] = address
+                return address
+            end
+        end
+        address = address - 0x10000
+    end
+    return nil
+end
+
+-- Address of an exported function, following forwarders such as "KERNELBASE.CreateFileA".
+function lang.export(module, name, depth)
+    module = module:lower()
+    local table_ = lang.exports[module]
+    if table_ == nil then
+        table_ = false
+        local base = lang.module(module)
+        if base then
+            local u8 = ffi.cast("const uint8_t*", base)
+            local function u32(rva) return ffi.cast("const uint32_t*", u8 + rva)[0] end
+            local lfanew = ffi.cast("const int32_t*", u8 + 0x3C)[0]
+            local dir, size = u32(lfanew + 0x78), u32(lfanew + 0x7C)
+            if dir ~= 0 then
+                table_ = {u8 = u8, dir = dir, size = size, names = {}}
+                local count, functions, names, ordinals = u32(dir + 24), u32(dir + 28), u32(dir + 32), u32(dir + 36)
+                for i = 0, math.min(count, 65535) - 1 do
+                    local ordinal = ffi.cast("const uint16_t*", u8 + ordinals + i * 2)[0]
+                    table_.names[ffi.string(u8 + u32(names + i * 4))] = u32(functions + ordinal * 4)
+                end
+            end
+        end
+        lang.exports[module] = table_
+    end
+    local rva = table_ and table_.names[name]
+    if not rva then return nil end
+    if rva < table_.dir or rva >= table_.dir + table_.size then return table_.u8 + rva end
+    local dll, fn = ffi.string(table_.u8 + rva):match("^([^%.]+)%.(.+)$")
+    if not dll or (depth or 0) >= 3 or fn:sub(1, 1) == "#" then return nil end
+    if dll:lower():find("^api%-ms%-") or dll:lower():find("^ext%-ms%-") then dll = "kernelbase" end
+    return lang.export(dll .. ".dll", fn, (depth or 0) + 1)
+end
+
+-- lang.k32.Name: the ffi.C declaration when it works, otherwise the address from kernel32's export table.
+lang.k32 = setmetatable({}, {__index = function(t, name)
+    local ctype = lang.k32_types[name]
+    if not ctype then error("unknown kernel32 function " .. tostring(name)) end
+    local ok, fn = pcall(function() return ffi.C[name] end)
+    if not ok or fn == nil then
+        local address = lang.export("kernel32.dll", name)
+        if address == nil then
+            error("kernel32." .. name .. " unavailable (ffi.C: " .. tostring(fn) .. (lang.cdef_errors[1] and "; cdef: " .. lang.cdef_errors[1] or "") .. ")")
+        end
+        fn = ffi.cast(ctype, address)
+    end
+    rawset(t, name, fn)
+    return fn
+end})
 
 function lang.handle_ok(h)
     return h ~= nil and tonumber(ffi.cast("intptr_t", h)) ~= -1
 end
 
 function lang.exists(path)
-    local attributes = tonumber(ffi.C.GetFileAttributesA(path))
+    local attributes = tonumber(lang.k32.GetFileAttributesA(path))
     return attributes ~= nil and attributes ~= 0xFFFFFFFF and bit.band(attributes, 0x10) == 0
 end
 
 function lang.list(pattern)
-    local names, data = {}, ffi.new("unoins_find_data")
-    local h = ffi.C.FindFirstFileA(pattern, ffi.cast("void*", data))
+    -- WIN32_FIND_DATAA (320 bytes): dwFileAttributes at 0, cFileName[260] at 44.
+    local names, data = {}, ffi.new("uint8_t[320]")
+    local h = lang.k32.FindFirstFileA(pattern, ffi.cast("void*", data))
     if not lang.handle_ok(h) then return names end
     repeat
-        if bit.band(tonumber(data.attributes), 0x10) == 0 then names[#names + 1] = ffi.string(data.name) end
-    until #names >= 256 or not util.pressed(ffi.C.FindNextFileA(h, ffi.cast("void*", data)))
-    ffi.C.FindClose(h)
+        if bit.band(ffi.cast("uint32_t*", data)[0], 0x10) == 0 then names[#names + 1] = ffi.string(data + 44) end
+    until #names >= 256 or not util.pressed(lang.k32.FindNextFileA(h, ffi.cast("void*", data)))
+    lang.k32.FindClose(h)
     return names
 end
 
 function lang.read_file(path, limit)
-    local h = ffi.C.CreateFileA(path, 0x80000000, 3, nil, 3, 0x80, nil)
+    local h = lang.k32.CreateFileA(path, 0x80000000, 3, nil, 3, 0x80, nil)
     if not lang.handle_ok(h) then return nil, "cannot open " .. path end
     local ok, data = pcall(function()
-        local size = tonumber(ffi.C.GetFileSize(h, nil))
+        local size = tonumber(lang.k32.GetFileSize(h, nil))
         if not size or size == 0xFFFFFFFF or size > (limit or 16777216) then error("invalid size: " .. path) end
         if size == 0 then return "" end
         local buffer, got = ffi.new("uint8_t[?]", size), ffi.new("uint32_t[1]")
-        if not util.pressed(ffi.C.ReadFile(h, buffer, size, got, nil)) or got[0] ~= size then error("read failed: " .. path) end
+        if not util.pressed(lang.k32.ReadFile(h, buffer, size, got, nil)) or got[0] ~= size then error("read failed: " .. path) end
         return ffi.string(buffer, size)
     end)
-    ffi.C.CloseHandle(h)
+    lang.k32.CloseHandle(h)
     if not ok then return nil, data end
     return data
 end
 
 function lang.write_file(path, data)
-    local h = ffi.C.CreateFileA(path, 0x40000000, 0, nil, 2, 0x80, nil)
+    local h = lang.k32.CreateFileA(path, 0x40000000, 0, nil, 2, 0x80, nil)
     if not lang.handle_ok(h) then return false end
     local written = ffi.new("uint32_t[1]")
-    local ok = util.pressed(ffi.C.WriteFile(h, data, #data, written, nil)) and written[0] == #data
-    ffi.C.CloseHandle(h)
+    local ok = util.pressed(lang.k32.WriteFile(h, data, #data, written, nil)) and written[0] == #data
+    lang.k32.CloseHandle(h)
     return ok
 end
 
 function lang.utf8(wide, count)
-    local size = ffi.C.WideCharToMultiByte(65001, 0, wide, count, nil, 0, nil, nil)
+    local size = lang.k32.WideCharToMultiByte(65001, 0, wide, count, nil, 0, nil, nil)
     if size <= 0 then return nil end
     local out = ffi.new("char[?]", size)
-    size = ffi.C.WideCharToMultiByte(65001, 0, wide, count, out, size, nil, nil)
+    size = lang.k32.WideCharToMultiByte(65001, 0, wide, count, out, size, nil, nil)
     if size <= 0 then return nil end
     return ffi.string(out, count < 0 and size - 1 or size)
 end
@@ -2621,7 +2696,7 @@ end
 
 function lang.paths()
     local buffer = ffi.new("char[520]")
-    local n = tonumber(ffi.C.GetModuleFileNameA(nil, buffer, 520)) or 0
+    local n = tonumber(lang.k32.GetModuleFileNameA(nil, buffer, 520)) or 0
     if n <= 0 or n >= 520 then return nil end
     local root = ffi.string(buffer, n):match("^(.*)[\\/][^\\/]+$")
     if not root then return nil end
@@ -2671,7 +2746,7 @@ end
 
 -- Language the game was started with: -language launch option, then the Steam manifest, then cl_language.
 function lang.detect()
-    local line = ffi.C.GetCommandLineA()
+    local line = lang.k32.GetCommandLineA()
     local arg = line ~= nil and ffi.string(line):lower():match("%-language%s+\"?([%a]+)")
     if arg and lang.by_code[arg] then return arg end
     local manifest = lang.manifest_path()
@@ -2706,7 +2781,8 @@ function lang.init()
         lang.items = table.concat(items, "|")
     end)
     if not ok then return lang.fail(err) end
-    lang.current = lang.detect()
+    local detected, current = pcall(lang.detect)
+    lang.current = detected and current or "english"
     lang.selected, lang.status = lang.current, "Active"
     local saved = database.read(lang.db_key)
     if type(saved) == "string" and lang.by_code[saved] then
@@ -2831,11 +2907,11 @@ function lang.write_manifest(code)
     local updated = lang.acf_language(text, code)
     if not updated then return false, "unexpected appmanifest format" end
     if updated == text then return true, "unchanged" end
-    ffi.C.CopyFileA(path, path .. ".unoins_bak", 1)
+    lang.k32.CopyFileA(path, path .. ".unoins_bak", 1)
     local temp = path .. ".unoins_tmp"
     if not lang.write_file(temp, updated) then return false, "write failed" end
-    if not util.pressed(ffi.C.MoveFileExA(temp, path, 0x9)) then
-        ffi.C.DeleteFileA(temp)
+    if not util.pressed(lang.k32.MoveFileExA(temp, path, 0x9)) then
+        lang.k32.DeleteFileA(temp)
         return false, "replace failed"
     end
     return true, "written"
