@@ -2696,7 +2696,7 @@ lang.js = [[
             if (pair.length === 2) options += '<Label id="' + PREFIX + esc(pair[0]) + '" text="' + esc(pair[1]) + '" style="margin: 4px 12px; font-size: 18px; color: #ffffff;" />';
         }
         return '<root>' + (styled ? '<styles><include src="file://{resources}/styles/csgostyles.css" /></styles>' : '') +
-            '<Panel style="horizontal-align: right; vertical-align: top; margin-top: 96px; margin-right: 48px; padding: 8px 14px; flow-children: right; background-color: #000000b0; border-radius: 3px; z-index: 50;">' +
+            '<Panel style="horizontal-align: right; vertical-align: top; height: 52px; margin-top: 96px; margin-right: 48px; margin-bottom: -52px; padding: 8px 14px; flow-children: right; background-color: #000000d0; border-radius: 3px; z-index: 100;">' +
             '<Label text="Language · 语言" style="vertical-align: center; margin-right: 12px; font-size: 18px; color: #ffffffd0;" />' +
             '<DropDown id="UnoinsLanguageDrop"' + (styled ? ' class="PopupButton" menuclass="DropDownMenu" style="width: 280px; vertical-align: center;"'
                 : ' style="width: 280px; vertical-align: center; padding: 4px 8px; background-color: #262626f0;"') + '>' + options + '</DropDown>' +
@@ -2711,6 +2711,9 @@ lang.js = [[
         try { loaded = row.BLoadLayoutFromString(layout(items, true), false, false); } catch (e) {}
         if (!loaded) { try { loaded = row.BLoadLayoutFromString(layout(items, false), false, false); } catch (e) {} }
         if (!loaded) { row.DeleteAsync(0.0); row = null; return false; }
+        // First child: in a parent that stacks its children, a last child ends up below the page content.
+        // The negative bottom margin keeps the content where it was; z-index draws the row on top of it.
+        try { var first = parent.GetChild(0); if (valid(first) && first.id !== ROW_ID) parent.MoveChildBefore(row, first); } catch (e) {}
         drop = row.FindChildTraverse("UnoinsLanguageDrop");
         status = row.FindChildTraverse("UnoinsLanguageStatus");
         if (valid(drop)) {
@@ -2730,6 +2733,13 @@ lang.js = [[
             if (valid(drop) && applied !== selected) { drop.SetSelected(PREFIX + selected); applied = selected; pending = ""; }
             if (valid(status) && status.text !== text) status.text = text;
             return "ok|" + (parent.id || "(no id)");
+        },
+        geometry: function () {
+            if (!valid(row) || !(row.actuallayoutwidth > 0)) return "";
+            var g = "row at " + Math.round(row.actualxoffset) + "," + Math.round(row.actualyoffset) + " size " + Math.round(row.actuallayoutwidth) + "x" + Math.round(row.actuallayoutheight);
+            try { var w = row.GetPositionWithinWindow(); g += ", window " + Math.round(w.x) + "," + Math.round(w.y); } catch (e) {}
+            try { var p = row.GetParent(); g += ", parent '" + p.id + "' " + Math.round(p.actuallayoutwidth) + "x" + Math.round(p.actuallayoutheight) + ", child " + (p.GetChildIndex ? p.GetChildIndex(row) : "?") + "/" + p.GetChildCount(); } catch (e) {}
+            return g;
         },
         diagnose: function () {
             var root = $.GetContextPanel(), top = [], like = [];
@@ -2804,6 +2814,11 @@ function lang.tick()
     local outcome, where = tostring(result):match("^([^|]*)|?(.*)$")
     if outcome == "ok" then
         lang.missing_since = nil
+        local ok_geo, geometry = pcall(bridge.geometry)
+        if ok_geo and type(geometry) == "string" and geometry ~= "" and geometry ~= lang.geometry and (lang.geometry_logs or 0) < 3 then
+            lang.geometry, lang.geometry_logs = geometry, (lang.geometry_logs or 0) + 1
+            style.log("language switcher " .. geometry)
+        end
         if lang.attached ~= where then
             lang.attached = where
             style.log("language switcher attached to Panorama panel '" .. where .. "'"
