@@ -2539,11 +2539,6 @@ end
 lang.probe_tokens = {"SFUI_Notice_Terrorists_Win", "SFUI_Notice_CTs_Win", "SFUI_Notice_Target_Bombed",
     "SFUI_Notice_Bomb_Defused", "SFUI_Notice_Round_Draw"}
 
-function lang.fail(reason)
-    lang.disabled = true
-    client.error_log("[Ünoins_qucy] Language switcher disabled: " .. tostring(reason))
-end
-
 -- Language the game is running in, as far as the engine reports it.
 function lang.detect()
     local ok, value = pcall(function() return cvar.cl_language:get_string() end)
